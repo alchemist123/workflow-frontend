@@ -23,21 +23,16 @@ interface WorkflowState {
   // UI state
   isSaving: boolean
   isExecuting: boolean
-  isDeploying: boolean
+  isPackaging: boolean
   sidebarOpen: boolean
   compileErrors: string[]
-  deployResult: {
-    success: boolean
-    image_tag?: string
+  packageResult: {
+    package_dir: string
+    compose_command: string
+    service_url: string
+    service_port: number
+    files: string[]
     error?: string
-    logs?: string[]
-    compose_command?: string
-    runner_dir?: string
-    docker_available?: boolean
-    container_id?: string
-    service_url?: string
-    service_port?: number
-    container_error?: string
   } | null
 
   // Canvas actions
@@ -55,12 +50,12 @@ interface WorkflowState {
   setCurrentWorkflow: (wf: Workflow) => void
   saveAndCompile: () => Promise<CompileResponse | null>
   executeWorkflow: (payload?: Record<string, unknown>) => Promise<WorkflowExecution | null>
-  deployWorkflow: () => Promise<void>
+  packageWorkflow: () => Promise<void>
   loadExecutions: () => Promise<void>
   loadNodeLogs: (workflowId: string, executionId: string) => Promise<void>
   clearNodeStatus: () => void
   setSidebarOpen: (open: boolean) => void
-  clearDeployResult: () => void
+  clearPackageResult: () => void
   loadCanvas: (version: WorkflowVersion) => void
 }
 
@@ -78,8 +73,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   nodeStatus: {},
   isSaving: false,
   isExecuting: false,
-  isDeploying: false,
-  deployResult: null,
+  isPackaging: false,
+  packageResult: null,
   sidebarOpen: false,
   compileErrors: [],
 
@@ -237,47 +232,28 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   clearNodeStatus: () => set({ nodeStatus: {} }),
 
-  deployWorkflow: async () => {
+  packageWorkflow: async () => {
     const { currentWorkflow, lastCompile } = get()
     if (!currentWorkflow || !lastCompile?.version_id || !lastCompile.is_valid) return
-    set({ isDeploying: true, deployResult: null })
+    set({ isPackaging: true, packageResult: null })
     try {
-      // Start the build — returns immediately with a deploy_id
-      const { deploy_id } = await workflowApi.packageWorkflow(currentWorkflow.id, lastCompile.version_id)
-
-      // Poll every 3 seconds until done or failed (max 3 minutes)
-      const deadline = Date.now() + 3 * 60 * 1000
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 3000))
-        const status = await workflowApi.getDeployStatus(deploy_id)
-        if (status.status === 'done' || status.status === 'failed') {
-          set({
-            isDeploying: false,
-            deployResult: {
-              success: status.success ?? status.status === 'done',
-              image_tag: status.image_tag,
-              error: status.error,
-              logs: status.logs,
-              compose_command: status.compose_command,
-              runner_dir: status.runner_dir,
-              docker_available: status.docker_available,
-              container_id: status.container_id,
-              service_url: status.service_url,
-              service_port: status.service_port,
-              container_error: status.container_error,
-            },
-          })
-          return
-        }
-      }
-      set({ isDeploying: false, deployResult: { success: false, error: 'Deploy timed out after 3 minutes' } })
+      const result = await workflowApi.packageWorkflow(currentWorkflow.id, lastCompile.version_id)
+      set({ isPackaging: false, packageResult: result })
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Deploy failed'
-      set({ isDeploying: false, deployResult: { success: false, error: message } })
+      const status = (err as { response?: { status?: number } }).response?.status
+      const message = status === 404
+        ? 'Version not found in the database — please Save & Compile again before packaging'
+        : err instanceof Error ? err.message : 'Packaging failed'
+      // 404 means the compiled version is gone; reset lastCompile so the button re-disables
+      set({
+        isPackaging: false,
+        lastCompile: status === 404 ? null : get().lastCompile,
+        packageResult: { package_dir: '', compose_command: '', service_url: '', service_port: 0, files: [], error: message },
+      })
     }
   },
 
-  clearDeployResult: () => set({ deployResult: null }),
+  clearPackageResult: () => set({ packageResult: null }),
 
   loadCanvas: (version) => {
     // The API stores CanvasNode shape (flat: id, type, position, metadata, config, …).
@@ -314,6 +290,11 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       targetHandle: e.target_handle || 'input',
     }))
 
-    set({ nodes: rfNodes, edges: rfEdges, currentVersion: version })
+    // Restore lastCompile from the loaded version so Package is enabled without re-compiling
+    const restoredCompile = version.is_valid
+      ? { version_id: version.id, is_valid: true, errors: version.validation_errors || [], ir: version.ir_json || null }
+      : null
+
+    set({ nodes: rfNodes, edges: rfEdges, currentVersion: version, lastCompile: restoredCompile })
   },
 }))

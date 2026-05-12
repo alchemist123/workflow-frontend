@@ -34,10 +34,13 @@ export const workflowApi = {
     api.get<Array<{ node_id: string; node_type: string; status: string; error: string | null; started_at: string | null; finished_at: string | null }>>(`/workflows/${workflowId}/executions/${executionId}/node_logs`).then(r => r.data),
 
   packageWorkflow: (workflowId: string, versionId: string) =>
-    api.post(`/workflows/${workflowId}/versions/${versionId}/package`).then(r => r.data),
-
-  getDeployStatus: (deployId: string) =>
-    api.get(`/workflows/deploys/${deployId}`).then(r => r.data),
+    api.post<{
+      package_dir: string
+      compose_command: string
+      service_url: string
+      service_port: number
+      files: string[]
+    }>(`/workflows/${workflowId}/versions/${versionId}/package`).then(r => r.data),
 
   getPalette: () => api.get<PaletteNode[]>('/workflows/palette').then(r => r.data),
 }

@@ -496,19 +496,18 @@ function EndForm({ cfg, save }: FormProps) {
 /* ─── Model ────────────────────────────────────────────────────────────────── */
 
 const PROVIDER_MODELS: Record<string, string[]> = {
-  anthropic: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
-  google: ['gemini-2.0-flash', 'gemini-2.5-pro-preview-03-25', 'gemini-1.5-pro', 'gemini-1.5-flash'],
-  vertex_ai: ['gemini-2.0-flash-001', 'gemini-2.0-flash-lite-001', 'gemini-2.5-pro-preview-03-25', 'gemini-1.5-pro-001', 'gemini-1.5-flash-001'],
+  google: ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
+  vertex_ai: ['gemini-2.0-flash-001', 'gemini-2.0-flash-lite-001', 'gemini-2.5-flash-001', 'gemini-1.5-pro-001', 'gemini-1.5-flash-001'],
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
-  anthropic: 'Anthropic', google: 'Google', vertex_ai: 'Vertex AI',
+  google: 'Google', vertex_ai: 'Vertex AI',
 }
 
 function ModelForm({ cfg, save }: FormProps) {
   const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
-  const provider = String(cfg.provider || 'anthropic')
-  const models = PROVIDER_MODELS[provider] || PROVIDER_MODELS['anthropic']
+  const provider = String(cfg.provider || 'google')
+  const models = PROVIDER_MODELS[provider] ?? PROVIDER_MODELS.google
   const currentModel = String(cfg.model || models[0])
 
   return (
@@ -518,15 +517,14 @@ function ModelForm({ cfg, save }: FormProps) {
       {/* Provider */}
       <Field label="Provider">
         <div className="flex gap-1">
-          {(['anthropic', 'google', 'vertex_ai'] as const).map((p) => (
+          {(['google', 'vertex_ai'] as const).map((p) => (
             <button
               key={p}
               onClick={() => save({ ...cfg, provider: p, model: PROVIDER_MODELS[p][0] })}
               className={`flex-1 py-1 text-[10px] rounded-md border font-medium transition-colors ${
                 provider === p
-                  ? p === 'google' ? 'bg-blue-500 border-blue-500 text-white'
-                  : p === 'vertex_ai' ? 'bg-orange-500 border-orange-500 text-white'
-                  : 'bg-emerald-600 border-emerald-600 text-white'
+                  ? p === 'vertex_ai' ? 'bg-orange-500 border-orange-500 text-white'
+                  : 'bg-blue-500 border-blue-500 text-white'
                   : 'bg-white border-gray-200 text-gray-600 hover:border-gray-400'
               }`}
             >
@@ -545,18 +543,18 @@ function ModelForm({ cfg, save }: FormProps) {
         />
       </Field>
 
-      {/* API Key — only for anthropic / google */}
-      {provider !== 'vertex_ai' && (
-        <Field label={provider === 'google' ? 'Google API key' : 'Anthropic API key'}>
+      {/* API Key — only for google */}
+      {provider === 'google' && (
+        <Field label="Google API key">
           <input
             type="password"
             value={String(cfg.api_key || '')}
             onChange={(e) => s('api_key', e.target.value || undefined)}
-            placeholder="sk-… (leave empty to use server env var)"
+            placeholder="AIza… (leave empty to use GOOGLE_API_KEY env var)"
             className="w-full text-xs px-2 py-1.5 border border-gray-200 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-400 font-mono"
           />
           <p className="text-[10px] text-gray-400 mt-1">
-            Leave empty to use <code className="bg-gray-100 px-0.5 rounded">{provider === 'google' ? 'GOOGLE_API_KEY' : 'ANTHROPIC_API_KEY'}</code> env var.
+            Leave empty to use <code className="bg-gray-100 px-0.5 rounded">GOOGLE_API_KEY</code> env var.
           </p>
         </Field>
       )}
@@ -617,16 +615,12 @@ function ModelForm({ cfg, save }: FormProps) {
 type MCP = { name: string; url: string; transport?: string }
 type A2A = { name: string; endpoint: string; description?: string }
 
-const FRAMEWORKS = ['anthropic', 'langgraph', 'adk'] as const
-const FRAMEWORK_MODELS: Record<string, string[]> = {
-  anthropic: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
-  langgraph:  ['claude-opus-4-7', 'claude-sonnet-4-6'],
-  adk:        ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
-}
+const ADK_MODELS = PROVIDER_MODELS.google
 
 function AgentForm({ cfg, save }: FormProps) {
-  const framework = String(cfg.framework || 'anthropic')
   const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
+  const currentModel = String(cfg.model || ADK_MODELS[0])
+  const displayModel = ADK_MODELS.includes(currentModel) ? currentModel : ADK_MODELS[0]
 
   const mcpServers: MCP[] = (cfg.mcp_servers as MCP[]) || []
   const a2aAgents: A2A[] = (cfg.a2a_agents as A2A[]) || []
@@ -638,38 +632,30 @@ function AgentForm({ cfg, save }: FormProps) {
 
   return (
     <section className="space-y-3">
-      <SectionLabel>Agent</SectionLabel>
+      <SectionLabel>Agent (ADK)</SectionLabel>
 
-      {/* Framework */}
-      <Field label="Framework">
-        <div className="flex gap-1">
-          {FRAMEWORKS.map((f) => (
-            <button key={f} onClick={() => save({ ...cfg, framework: f, model: FRAMEWORK_MODELS[f][0] })}
-              className={`flex-1 py-1 text-[10px] rounded-md border font-medium transition-colors ${
-                framework === f ? 'bg-amber-500 border-amber-500 text-white' : 'bg-white border-gray-200 text-gray-600 hover:border-amber-400'
-              }`}>
-              {f === 'anthropic' ? 'Anthropic' : f === 'langgraph' ? 'LangGraph' : 'ADK'}
-            </button>
-          ))}
-        </div>
-      </Field>
-
-      {/* Model */}
       <Field label="Model">
-        <Select value={String(cfg.model || FRAMEWORK_MODELS[framework][0])} onChange={(v) => s('model', v)}
-          options={(FRAMEWORK_MODELS[framework] || []).map((m) => ({ value: m, label: m }))} />
+        <Select value={displayModel} onChange={(v) => s('model', v)}
+          options={ADK_MODELS.map((m) => ({ value: m, label: m }))} />
       </Field>
 
-      {/* System prompt */}
       <Field label="System prompt">
         <TextArea value={String(cfg.system_prompt || '')} onChange={(v) => s('system_prompt', v)}
           placeholder="You are a helpful assistant." rows={4} />
       </Field>
 
-      {/* Max iterations */}
-      <Field label="Max iterations">
-        <NumberInput value={Number(cfg.max_iterations || 10)} onChange={(v) => s('max_iterations', v)} min={1} max={50} />
+      <Field label="GCP Project ID (Vertex AI)">
+        <TextInput value={String(cfg.vertex_project || '')} onChange={(v) => s('vertex_project', v)}
+          placeholder="my-gcp-project (leave empty to use Google AI Studio key)" mono />
       </Field>
+      {!cfg.vertex_project && (
+        <Field label="Google API key (AI Studio)">
+          <input type="password" value={String(cfg.api_key || '')}
+            onChange={(e) => s('api_key', e.target.value || undefined)}
+            placeholder="AIza… (leave empty to use GOOGLE_API_KEY env var)"
+            className="w-full text-xs px-2 py-1.5 border border-gray-200 rounded-md focus:outline-none focus:ring-1 focus:ring-amber-400 font-mono" />
+        </Field>
+      )}
 
       {/* MCP Servers */}
       <div>
@@ -730,8 +716,9 @@ function AgentForm({ cfg, save }: FormProps) {
 type InlineFunction = { name: string; description: string; parameters: string; code: string }
 
 function OrchestratorAgentForm({ cfg, save }: FormProps) {
-  const framework = String(cfg.framework || 'anthropic')
   const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
+  const currentModel = String(cfg.model || ADK_MODELS[0])
+  const displayModel = ADK_MODELS.includes(currentModel) ? currentModel : ADK_MODELS[0]
 
   const fns: InlineFunction[] = ((cfg.functions as InlineFunction[]) || []).map((f) => ({
     name: f.name || '',
@@ -759,58 +746,33 @@ function OrchestratorAgentForm({ cfg, save }: FormProps) {
         Connect <strong>TOOL</strong>, <strong>DATASOURCE</strong>, <strong>REMOTE AGENT</strong>, or <strong>FUNCTION</strong> nodes to the <strong>bottom handle</strong> to give this agent access to them as tools.
       </p>
 
-      {/* Framework */}
-      <Field label="Framework">
-        <div className="flex gap-1">
-          {(['anthropic', 'langgraph', 'adk'] as const).map((f) => (
-            <button key={f} onClick={() => save({ ...cfg, framework: f, model: FRAMEWORK_MODELS[f][0] })}
-              className={`flex-1 py-1 text-[10px] rounded-md border font-medium transition-colors ${
-                framework === f ? 'bg-amber-500 border-amber-500 text-white' : 'bg-white border-gray-200 text-gray-600 hover:border-amber-400'
-              }`}>
-              {f === 'anthropic' ? 'Anthropic' : f === 'langgraph' ? 'LangGraph' : 'ADK'}
-            </button>
-          ))}
-        </div>
-      </Field>
-
       <Field label="Model">
-        <Select value={String(cfg.model || FRAMEWORK_MODELS[framework][0])} onChange={(v) => s('model', v)}
-          options={(FRAMEWORK_MODELS[framework] || []).map((m) => ({ value: m, label: m }))} />
+        <Select value={displayModel} onChange={(v) => s('model', v)}
+          options={ADK_MODELS.map((m) => ({ value: m, label: m }))} />
       </Field>
 
-      {/* ADK: show Vertex AI fields OR Google API key */}
-      {framework === 'adk' ? (
+      <Field label="GCP Project ID (Vertex AI)">
+        <TextInput value={String(cfg.vertex_project || '')} onChange={(v) => s('vertex_project', v)}
+          placeholder="my-gcp-project (leave empty to use Google AI Studio key)" mono />
+      </Field>
+      {!!cfg.vertex_project && (
         <>
-          <Field label="GCP Project ID (Vertex AI)">
-            <TextInput value={String(cfg.vertex_project || '')} onChange={(v) => s('vertex_project', v)} placeholder="my-gcp-project (leave empty to use Google AI Studio key)" mono />
+          <Field label="Location / Region">
+            <TextInput value={String(cfg.vertex_location || 'us-central1')} onChange={(v) => s('vertex_location', v)} placeholder="us-central1" mono />
           </Field>
-          {cfg.vertex_project && (
-            <>
-              <Field label="Location / Region">
-                <TextInput value={String(cfg.vertex_location || 'us-central1')} onChange={(v) => s('vertex_location', v)} placeholder="us-central1" mono />
-              </Field>
-              <Field label="Service account JSON (optional)">
-                <TextArea value={String(cfg.service_account_json || '')} onChange={(v) => s('service_account_json', v || undefined)}
-                  placeholder={'{"type":"service_account","project_id":"..."}'} rows={4} mono />
-                <p className="text-[10px] text-gray-400 mt-1">Leave empty to use ADC.</p>
-              </Field>
-            </>
-          )}
-          {!cfg.vertex_project && (
-            <Field label="Google API key (AI Studio)">
-              <input type="password" value={String(cfg.api_key || '')}
-                onChange={(e) => s('api_key', e.target.value || undefined)}
-                placeholder="AIza… (leave empty to use server env var)"
-                className="w-full text-xs px-2 py-1.5 border border-gray-200 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-400 font-mono" />
-            </Field>
-          )}
+          <Field label="Service account JSON (optional)">
+            <TextArea value={String(cfg.service_account_json || '')} onChange={(v) => s('service_account_json', v || undefined)}
+              placeholder={'{"type":"service_account","project_id":"..."}'} rows={4} mono />
+            <p className="text-[10px] text-gray-400 mt-1">Leave empty to use ADC.</p>
+          </Field>
         </>
-      ) : (
-        <Field label="Anthropic API key">
+      )}
+      {!cfg.vertex_project && (
+        <Field label="Google API key (AI Studio)">
           <input type="password" value={String(cfg.api_key || '')}
             onChange={(e) => s('api_key', e.target.value || undefined)}
-            placeholder="sk-… (leave empty to use server env var)"
-            className="w-full text-xs px-2 py-1.5 border border-gray-200 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-400 font-mono" />
+            placeholder="AIza… (leave empty to use GOOGLE_API_KEY env var)"
+            className="w-full text-xs px-2 py-1.5 border border-gray-200 rounded-md focus:outline-none focus:ring-1 focus:ring-amber-400 font-mono" />
         </Field>
       )}
 

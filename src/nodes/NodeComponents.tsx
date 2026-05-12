@@ -140,7 +140,7 @@ const OrchestratorAgentNode = memo(({ data, id, selected }: NodeProps) => {
   const config = (nodeData.config || {}) as Record<string, unknown>
 
   const title = (nodeData.metadata as { title?: string })?.title || palette.label
-  const framework = String(config.framework || 'anthropic').toUpperCase()
+  const framework = 'ADK'
   const executionMode = String(config.tool_execution_mode || 'sequential')
   const outputField = config.output_field ? String(config.output_field) : null
 

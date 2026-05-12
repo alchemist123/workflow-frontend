@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  Save, Play, Rocket, CheckCircle, XCircle,
+  Save, Play, Package, CheckCircle, XCircle,
   Loader2, List, ArrowLeft, ChevronDown, X,
   Terminal, Copy, Check, RefreshCw, Clock, AlertCircle,
-  ChevronRight,
+  ChevronRight, FolderOpen,
 } from 'lucide-react'
 import { useWorkflowStore } from '../../store/workflowStore'
 import type { WorkflowExecution } from '../../types/workflow'
@@ -16,11 +16,11 @@ export default function Toolbar({ onBack }: ToolbarProps) {
   const {
     currentWorkflow,
     nodes,
-    isSaving, isExecuting, isDeploying,
-    lastCompile, compileErrors, compileWarnings, deployResult,
-    saveAndCompile, executeWorkflow, deployWorkflow,
+    isSaving, isExecuting, isPackaging,
+    lastCompile, compileErrors, compileWarnings, packageResult,
+    saveAndCompile, executeWorkflow, packageWorkflow,
     loadExecutions, executions,
-    clearDeployResult,
+    clearPackageResult,
     loadNodeLogs, clearNodeStatus,
   } = useWorkflowStore()
 
@@ -92,19 +92,19 @@ export default function Toolbar({ onBack }: ToolbarProps) {
     }
   }
 
-  const handleDeploy = async () => {
-    clearDeployResult()
-    await deployWorkflow()
+  const handlePackage = async () => {
+    clearPackageResult()
+    await packageWorkflow()
   }
 
-  const copyTag = (tag: string) => {
-    navigator.clipboard.writeText(tag)
+  const copyText = (text: string) => {
+    navigator.clipboard.writeText(text)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
 
   const canRun = lastCompile?.is_valid && !isExecuting
-  const canDeploy = lastCompile?.is_valid && !isDeploying
+  const canPackage = lastCompile?.is_valid && !isPackaging
 
   const statusBadge = lastCompile && (
     <button
@@ -169,17 +169,17 @@ export default function Toolbar({ onBack }: ToolbarProps) {
           Run
         </button>
 
-        {/* Deploy */}
+        {/* Package */}
         <button
-          onClick={handleDeploy}
-          disabled={!canDeploy}
-          title={!lastCompile?.is_valid ? 'Save & Compile first' : 'Build Docker image'}
+          onClick={handlePackage}
+          disabled={!canPackage}
+          title={!lastCompile?.is_valid ? 'Save & Compile first' : 'Generate standalone project'}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs rounded-md font-medium transition-colors"
         >
-          {isDeploying
+          {isPackaging
             ? <Loader2 size={13} className="animate-spin" />
-            : <Rocket size={13} />}
-          {isDeploying ? 'Building…' : 'Deploy'}
+            : <Package size={13} />}
+          {isPackaging ? 'Packaging…' : 'Package'}
         </button>
 
         {/* Runs toggle */}
@@ -332,12 +332,12 @@ export default function Toolbar({ onBack }: ToolbarProps) {
         />
       )}
 
-      {/* ── Deploy result modal ── */}
-      {deployResult && (
-        <DeployResultModal
-          result={deployResult}
-          onClose={clearDeployResult}
-          onCopy={copyTag}
+      {/* ── Package result modal ── */}
+      {packageResult && (
+        <PackageResultModal
+          result={packageResult}
+          onClose={clearPackageResult}
+          onCopy={copyText}
           copied={copied}
         />
       )}
@@ -718,57 +718,39 @@ function RunInputModal({
   )
 }
 
-/* ─── Deploy result modal ──────────────────────────────────────────────────── */
+/* ─── Package result modal ─────────────────────────────────────────────────── */
 
-interface DeployResult {
-  success: boolean
-  image_tag?: string
+interface PackageResult {
+  package_dir: string
+  compose_command: string
+  service_url: string
+  service_port: number
+  files: string[]
   error?: string
-  logs?: string[]
-  compose_command?: string
-  runner_dir?: string
-  docker_available?: boolean
-  container_id?: string
-  service_url?: string
-  service_port?: number
-  container_error?: string
 }
 
-function DeployResultModal({
+function PackageResultModal({
   result,
   onClose,
   onCopy,
   copied,
 }: {
-  result: DeployResult
+  result: PackageResult
   onClose: () => void
-  onCopy: (tag: string) => void
+  onCopy: (text: string) => void
   copied: boolean
 }) {
-  const [showLogs, setShowLogs] = useState(false)
-
+  const hasError = !!result.error
   return (
     <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
 
         {/* Header */}
-        <div className={`flex items-center justify-between px-5 py-4 ${
-          result.success
-            ? result.docker_available === false
-              ? 'bg-amber-500'
-              : result.service_url
-                ? 'bg-green-600'
-                : 'bg-purple-600'
-            : 'bg-red-500'
-        }`}>
+        <div className={`flex items-center justify-between px-5 py-4 ${hasError ? 'bg-red-500' : 'bg-purple-600'}`}>
           <div className="flex items-center gap-2 text-white">
-            {result.success
-              ? result.docker_available === false
-                ? <><Rocket size={18} /><span className="font-semibold">Package ready — build manually</span></>
-                : result.service_url
-                  ? <><CheckCircle size={18} /><span className="font-semibold">Container running</span></>
-                  : <><Rocket size={18} /><span className="font-semibold">Image built</span></>
-              : <><XCircle size={18} /><span className="font-semibold">Deploy failed</span></>}
+            {hasError
+              ? <><XCircle size={18} /><span className="font-semibold">Packaging failed</span></>
+              : <><Package size={18} /><span className="font-semibold">Package ready</span></>}
           </div>
           <button onClick={onClose} className="text-white/70 hover:text-white transition-colors">
             <X size={18} />
@@ -777,101 +759,71 @@ function DeployResultModal({
 
         <div className="p-5 space-y-4">
 
-          {result.success && result.docker_available === false && result.runner_dir && (
+          {hasError && (
+            <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2.5">
+              <p className="text-red-700 text-xs font-mono whitespace-pre-wrap">{result.error}</p>
+            </div>
+          )}
+
+          {!hasError && (
             <>
-              <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5">
-                <p className="text-amber-800 text-xs font-medium">
-                  Docker daemon not reachable from the API server. Package is ready — one command to start:
-                </p>
-              </div>
+              {/* Directory */}
               <div>
-                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Package location</p>
+                <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 flex items-center gap-1">
+                  <FolderOpen size={11} /> Package directory
+                </p>
                 <div className="flex items-center gap-2 bg-gray-900 rounded-lg px-3 py-2.5">
-                  <span className="text-blue-300 font-mono text-xs flex-1 break-all">{result.runner_dir}</span>
-                  <button onClick={() => onCopy(result.runner_dir!)} className="text-gray-400 hover:text-white flex-shrink-0">
-                    {copied ? <Check size={14} className="text-green-400" /> : <Copy size={14} />}
+                  <span className="text-blue-300 font-mono text-xs flex-1 break-all">{result.package_dir}</span>
+                  <button onClick={() => onCopy(result.package_dir)} className="text-gray-400 hover:text-white flex-shrink-0" title="Copy path">
+                    {copied ? <Check size={13} className="text-green-400" /> : <Copy size={13} />}
                   </button>
                 </div>
               </div>
-              {result.compose_command && (
+
+              {/* Start command */}
+              <div>
+                <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 flex items-center gap-1">
+                  <Terminal size={11} /> Start the workflow
+                </p>
+                <div className="flex items-start gap-2 bg-gray-900 rounded-lg px-3 py-2.5">
+                  <Terminal size={11} className="text-gray-500 mt-0.5 flex-shrink-0" />
+                  <span className="text-green-400 font-mono text-xs flex-1 break-all">{result.compose_command}</span>
+                  <button onClick={() => onCopy(result.compose_command)} className="text-gray-400 hover:text-white flex-shrink-0" title="Copy command">
+                    {copied ? <Check size={13} className="text-green-400" /> : <Copy size={13} />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Service URL */}
+              <div className="flex items-center gap-2 bg-purple-50 border border-purple-100 rounded-lg px-3 py-2">
+                <span className="text-[10px] text-purple-500 font-medium">Once running:</span>
+                <a href={result.service_url + '/docs'} target="_blank" rel="noreferrer"
+                   className="text-purple-700 font-mono text-xs hover:underline flex-1">
+                  {result.service_url}/docs
+                </a>
+              </div>
+
+              {/* Files list */}
+              {result.files.length > 0 && (
                 <div>
-                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Start container</p>
-                  <div className="flex items-start gap-2 bg-gray-900 rounded-lg px-3 py-2.5">
-                    <Terminal size={12} className="text-gray-500 mt-0.5 flex-shrink-0" />
-                    <span className="text-green-400 font-mono text-xs flex-1 break-all">{result.compose_command}</span>
-                    <button onClick={() => onCopy(result.compose_command!)} className="text-gray-400 hover:text-white flex-shrink-0">
-                      {copied ? <Check size={14} className="text-green-400" /> : <Copy size={14} />}
-                    </button>
+                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Generated files</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {result.files.map((f) => (
+                      <span key={f} className="text-[10px] font-mono bg-gray-100 text-gray-600 px-2 py-0.5 rounded">{f}</span>
+                    ))}
                   </div>
                 </div>
               )}
+
+              <div className="bg-blue-50 border border-blue-100 rounded-lg px-3 py-2.5 text-[11px] text-blue-700 space-y-1">
+                <p className="font-semibold">This package is fully standalone</p>
+                <p>No dependency on this backend. Copy the directory to any machine, fill in <code className="bg-blue-100 px-1 rounded">.env</code>, and run the compose command.</p>
+              </div>
             </>
           )}
 
-          {result.success && result.service_url && result.docker_available !== false && (
-            <div>
-              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Live Service</p>
-              <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-3 py-2.5">
-                <a href={result.service_url + '/docs'} target="_blank" rel="noreferrer"
-                   className="text-green-700 font-mono text-sm flex-1 truncate hover:underline">
-                  {result.service_url}
-                </a>
-                <button onClick={() => onCopy(result.service_url!)} className="text-green-500 hover:text-green-700 flex-shrink-0">
-                  {copied ? <Check size={14} className="text-green-600" /> : <Copy size={14} />}
-                </button>
-              </div>
-              <p className="text-[10px] text-gray-400 mt-1">
-                Container: {result.container_id} ·{' '}
-                <a href={result.service_url + '/docs'} target="_blank" rel="noreferrer" className="underline">Open API docs →</a>
-              </p>
-            </div>
-          )}
-
-          {result.success && result.image_tag && result.docker_available !== false && (
-            <div>
-              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Docker Image</p>
-              <div className="flex items-center gap-2 bg-gray-900 rounded-lg px-3 py-2.5">
-                <span className="text-green-400 font-mono text-sm flex-1 truncate">{result.image_tag}</span>
-                <button onClick={() => onCopy(result.image_tag!)} className="text-gray-400 hover:text-white flex-shrink-0">
-                  {copied ? <Check size={14} className="text-green-400" /> : <Copy size={14} />}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {!result.success && result.error && (
-            <div>
-              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Error</p>
-              <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2.5">
-                <p className="text-red-700 text-xs font-mono whitespace-pre-wrap">{result.error}</p>
-              </div>
-            </div>
-          )}
-
-          {result.logs && result.logs.length > 0 && (
-            <div>
-              <button
-                onClick={() => setShowLogs(!showLogs)}
-                className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 font-medium"
-              >
-                <Terminal size={13} />
-                {showLogs ? 'Hide' : 'Show'} build logs ({result.logs.length} lines)
-              </button>
-              {showLogs && (
-                <div className="mt-2 bg-gray-900 rounded-lg p-3 max-h-40 overflow-y-auto">
-                  {result.logs.map((line, i) => (
-                    <p key={i} className="text-gray-300 font-mono text-[10px] leading-relaxed">{line}</p>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
           <div className="flex justify-end pt-1">
-            <button
-              onClick={onClose}
-              className="px-4 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs rounded-lg font-medium transition-colors"
-            >
+            <button onClick={onClose} className="px-4 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs rounded-lg font-medium transition-colors">
               Close
             </button>
           </div>
