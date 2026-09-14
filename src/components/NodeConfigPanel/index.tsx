@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { X, Trash2, ChevronDown, ChevronUp, Plus, Minus } from 'lucide-react'
 import { useWorkflowStore } from '../../store/workflowStore'
 import { PALETTE_BY_TYPE } from '../../nodes/index'
+import { workflowApi, type NodeInput } from '../../api/client'
 
 export default function NodeConfigPanel() {
   const { nodes, selectedNodeId, setSelectedNode, updateNodeConfig, updateNodeMetadata, deleteNode } =
@@ -65,9 +66,10 @@ export default function NodeConfigPanel() {
 
         {/* ── Per-node config forms ── */}
         {nodeType === 'A2A_START'         && <A2aStartForm         cfg={cfg} save={save} />}
-        {nodeType === 'TRANSFORM'            && <TransformForm           cfg={cfg} save={save} />}
+        {nodeType === 'TRANSFORM'            && <TransformForm           cfg={cfg} save={save} nodeId={selectedNode.id} />}
         {nodeType === 'CONDITION'            && <ConditionForm           cfg={cfg} save={save} />}
         {nodeType === 'LOOP'                 && <LoopForm                cfg={cfg} save={save} />}
+        {nodeType === 'WAIT'                 && <WaitForm                cfg={cfg} save={save} />}
         {nodeType === 'END'                  && <EndForm                 cfg={cfg} save={save} />}
         {nodeType === 'LLM_AGENT'            && <LlmAgentForm            cfg={cfg} save={save} nodeId={selectedNode.id} />}
         {nodeType === 'ORCHESTRATOR_AGENT'   && <OrchestratorAgentForm   cfg={cfg} save={save} />}
@@ -79,10 +81,13 @@ export default function NodeConfigPanel() {
         {nodeType === 'HUMAN_APPROVAL'    && <HumanApprovalForm    cfg={cfg} save={save} />}
         {nodeType === 'HUMAN_INPUT'       && <HumanInputForm       cfg={cfg} save={save} />}
         {nodeType === 'SUBWORKFLOW'       && <SubworkflowForm      cfg={cfg} save={save} />}
-        {nodeType === 'PARALLEL_FORK'     && <ParallelForkForm     cfg={cfg} save={save} />}
+        {nodeType === 'PARALLEL_FORK'     && <ParallelForkForm     cfg={cfg} save={save} nodeId={selectedNode.id} />}
         {nodeType === 'MERGE'             && <MergeForm            cfg={cfg} save={save} />}
         {nodeType === 'SEQUENTIAL_AGENT'  && <ToolGroupForm mode="sequential" nodeId={selectedNode.id} cfg={cfg} save={save} />}
         {nodeType === 'PARALLEL_AGENT'    && <ToolGroupForm mode="parallel"   nodeId={selectedNode.id} cfg={cfg} save={save} />}
+
+        {/* ── Variable (every node that produces a result) ── */}
+        <VariableField nodeType={nodeType} cfg={cfg} save={save} />
 
         {/* ── Schema reference ── */}
         {palette?.config_schema && (
@@ -439,10 +444,193 @@ function A2aStartForm({ cfg, save }: FormProps) {
 /* ─── Transform ────────────────────────────────────────────────────────────── */
 
 const MODES = [
+  { value: 'fields',   label: 'Fields'   },
   { value: 'jmespath', label: 'JMESPath' },
   { value: 'python',   label: 'Python'   },
   { value: 'jinja2',   label: 'Jinja2'   },
 ]
+
+type OutputField = {
+  name: string
+  type?: string
+  source?: string
+  default?: unknown
+  required?: boolean
+}
+
+const FIELD_TYPES = ['string', 'text', 'number', 'integer', 'boolean', 'object', 'array']
+
+/**
+ * Declare the output shape and say where each field comes from.
+ *
+ * Sources come from the backend rather than being guessed here: it already
+ * works out what a node can read (the entry payload contract, any declared
+ * output structure, what a human node collects, the variables its ancestors
+ * saved) in order to check the mapping at compile time. Asking it keeps the
+ * picker and the check agreeing.
+ */
+function FieldMapper({ nodeId, cfg, save }: FormProps & { nodeId: string }) {
+  const nodes = useWorkflowStore((st) => st.nodes)
+  const edges = useWorkflowStore((st) => st.edges)
+  const [inputs, setInputs] = useState<NodeInput[]>([])
+  const [opaque, setOpaque] = useState(false)
+  const fields: OutputField[] = (cfg.output_fields as OutputField[]) || []
+
+  // The canvas as the compiler will see it, so the picker offers exactly what
+  // the compiler will accept.
+  // No schema_version: the backend stamps the current one, the same way the
+  // save path does, so this never goes stale against a migration.
+  const canvas = useMemo(() => ({
+    nodes: nodes.map((n) => ({
+      id: n.id, type: n.type, version: '1', position: n.position,
+      metadata: n.data.metadata || { title: '', description: '' },
+      config: n.data.config || {},
+      io: { input_schema: { type: 'object' }, output_schema: { type: 'object' } },
+      policies: { timeout_seconds: 60, retry: { max_attempts: 1 }, on_error: 'fail' },
+    })),
+    edges: edges.map((e) => ({
+      id: e.id, source: e.source, source_handle: e.sourceHandle || 'output',
+      target: e.target, target_handle: e.targetHandle || 'input', condition: null,
+    })),
+  }), [nodes, edges])
+
+  useEffect(() => {
+    let cancelled = false
+    workflowApi.nodeInputs(canvas, nodeId)
+      .then((r) => { if (!cancelled) { setInputs(r.inputs); setOpaque(r.opaque) } })
+      .catch(() => { if (!cancelled) { setInputs([]); setOpaque(true) } })
+    return () => { cancelled = true }
+  }, [canvas, nodeId])
+
+  const setFields = (next: OutputField[]) => save({ ...cfg, output_fields: next })
+  const add = () => setFields([...fields, { name: '', type: 'string', source: '' }])
+  const remove = (i: number) => setFields(fields.filter((_, j) => j !== i))
+  const set = (i: number, key: keyof OutputField, value: unknown) =>
+    setFields(fields.map((f, j) => (j === i ? { ...f, [key]: value } : f)))
+
+  const byPath = new Map(inputs.map((i) => [i.path, i]))
+  const names = fields.map((f) => (f.name || '').trim())
+
+  return (
+    <>
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">
+            Output fields
+          </p>
+          <button onClick={add} className="text-slate-600 hover:text-slate-800 flex items-center gap-0.5 text-[10px]">
+            <Plus size={11} /> Add field
+          </button>
+        </div>
+        <p className="text-[10px] text-gray-400 mb-2">
+          The shape this node builds. Each field takes its value from something
+          available here.
+        </p>
+
+        {fields.length === 0 && (
+          <p className="text-[10px] text-red-500 mb-1">
+            Add at least one field, or switch to an expression mode.
+          </p>
+        )}
+
+        {fields.map((f, i) => {
+          const name = (f.name || '').trim()
+          const duplicate = !!name && names.indexOf(name) !== i
+          const chosen = f.source ? byPath.get(f.source) : undefined
+          const unknownSource = !!f.source && !chosen
+          const typeClash = !!chosen && !!f.type && chosen.type !== 'any' && chosen.type !== f.type
+          return (
+            <div key={i} className="mb-2 p-2 bg-slate-50 border border-slate-200 rounded-md space-y-1.5">
+              <div className="flex items-center gap-1">
+                <input
+                  value={f.name || ''}
+                  onChange={(e) => set(i, 'name', e.target.value)}
+                  placeholder="field_name"
+                  className={`flex-1 text-[10px] font-mono px-1.5 py-1 border rounded focus:outline-none focus:ring-1 min-w-0 ${
+                    !name || duplicate
+                      ? 'border-red-300 focus:ring-red-400 bg-red-50'
+                      : 'border-slate-200 focus:ring-slate-400'
+                  }`}
+                />
+                <select
+                  value={f.type || 'string'}
+                  onChange={(e) => set(i, 'type', e.target.value)}
+                  className="text-[10px] px-1 py-1 border border-slate-200 rounded focus:outline-none bg-white"
+                >
+                  {FIELD_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <label className="flex items-center gap-0.5 text-[10px] text-slate-600 cursor-pointer flex-shrink-0">
+                  <input type="checkbox" checked={!!f.required}
+                    onChange={(e) => set(i, 'required', e.target.checked)} className="w-3 h-3" />
+                  req
+                </label>
+                <button onClick={() => remove(i)} className="text-red-300 hover:text-red-500 flex-shrink-0">
+                  <Minus size={11} />
+                </button>
+              </div>
+
+              <select
+                value={f.source || ''}
+                onChange={(e) => set(i, 'source', e.target.value)}
+                className={`w-full text-[10px] px-1.5 py-1 border rounded bg-white focus:outline-none ${
+                  unknownSource ? 'border-amber-400' : 'border-slate-200'
+                }`}
+              >
+                <option value="">— pick a source —</option>
+                {inputs.filter((x) => x.source === 'payload').length > 0 && (
+                  <optgroup label="From the previous nodes">
+                    {inputs.filter((x) => x.source === 'payload').map((x) => (
+                      <option key={x.path} value={x.path}>{x.label}</option>
+                    ))}
+                  </optgroup>
+                )}
+                {inputs.filter((x) => x.source === 'variable').length > 0 && (
+                  <optgroup label="Saved variables">
+                    {inputs.filter((x) => x.source === 'variable').map((x) => (
+                      <option key={x.path} value={x.path}>{x.label}</option>
+                    ))}
+                  </optgroup>
+                )}
+                {unknownSource && <option value={f.source}>{f.source} (not found)</option>}
+              </select>
+
+              <input
+                value={f.default === undefined || f.default === null ? '' : String(f.default)}
+                onChange={(e) => set(i, 'default', e.target.value || undefined)}
+                placeholder="default if missing (optional)"
+                className="w-full text-[10px] px-1.5 py-1 border border-slate-100 rounded bg-white text-gray-600 focus:outline-none"
+              />
+
+              {duplicate && <p className="text-[10px] text-red-500">This field is built twice.</p>}
+              {!name && <p className="text-[10px] text-red-500">Field needs a name.</p>}
+              {!f.source && f.default === undefined && (
+                <p className="text-[10px] text-red-500">Pick a source, or give it a default.</p>
+              )}
+              {unknownSource && (
+                <p className="text-[10px] text-amber-600">
+                  Nothing upstream is known to produce <code>{f.source}</code>.
+                </p>
+              )}
+              {typeClash && (
+                <p className="text-[10px] text-amber-600">
+                  {f.source} is {chosen?.type}; it will be converted to {f.type}.
+                </p>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {inputs.length === 0 && (
+        <p className="text-[10px] text-amber-600">
+          {opaque
+            ? 'Nothing upstream declares its shape, so there is nothing to offer. Declare a payload on the entry node, or use an expression mode.'
+            : 'Connect this node to something first — it has nothing upstream to read.'}
+        </p>
+      )}
+    </>
+  )
+}
 
 const MODE_PLACEHOLDERS: Record<string, string> = {
   jmespath: 'body.items[0]',
@@ -450,8 +638,8 @@ const MODE_PLACEHOLDERS: Record<string, string> = {
   jinja2:   '{"name": "{{ name }}", "upper": "{{ name|upper }}"}',
 }
 
-function TransformForm({ cfg, save }: FormProps) {
-  const mode = String(cfg.mode || 'jmespath')
+function TransformForm({ cfg, save, nodeId }: FormProps & { nodeId: string }) {
+  const mode = String(cfg.mode || 'fields')
   const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
   return (
     <section className="space-y-3">
@@ -473,6 +661,9 @@ function TransformForm({ cfg, save }: FormProps) {
           ))}
         </div>
       </Field>
+      {mode === 'fields' && <FieldMapper nodeId={nodeId} cfg={cfg} save={save} />}
+
+      {mode !== 'fields' && (
       <Field label="Expression">
         <TextArea
           value={String(cfg.expression || '')}
@@ -487,6 +678,8 @@ function TransformForm({ cfg, save }: FormProps) {
           </p>
         )}
       </Field>
+      )}
+
       <Field label="Output key (optional)">
         <TextInput value={String(cfg.output_key || '')} onChange={(v) => s('output_key', v || undefined)} placeholder="wrap result in this key" />
       </Field>
@@ -629,6 +822,152 @@ function LoopForm({ cfg, save }: FormProps) {
           <code className="bg-gray-100 px-0.5 rounded">truncated</code> on the result.
         </p>
       </Field>
+    </section>
+  )
+}
+
+/* ─── Variable ─────────────────────────────────────────────────────────────── */
+
+// A tool group is resolved into its consumer's tool list and a MERGE is a
+// JoinNode, so neither produces a result of its own to name.
+// Mirrors _NO_VARIABLE in app/nodes/registry.py: types that produce no result
+// of their own. A tool group is resolved into its consumer's tool list, MERGE
+// is a JoinNode, and a fork hands each branch the payload it was given —
+// naming that would just save a second copy of the previous node's output.
+const NO_VARIABLE = new Set([
+  'SEQUENTIAL_AGENT', 'PARALLEL_AGENT', 'MERGE', 'PARALLEL_FORK',
+])
+
+// Mirrors app/nodes/variables.py. Variables are flat session-state keys, which
+// is how ADK does it, so they must not collide with what already lives there.
+const RESERVED_VARIABLES = new Set(['wf'])
+const RESERVED_PREFIXES = ['_loop_', 'app:', 'user:', 'temp:', '_']
+
+function variableProblem(name: string): string | null {
+  const value = name.trim()
+  if (!value) return null
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(value)) {
+    return 'Use a letter followed by letters, digits or underscores.'
+  }
+  if (RESERVED_VARIABLES.has(value) || RESERVED_PREFIXES.some((p) => value.startsWith(p))) {
+    return "Reserved — 'wf', '_loop_*', 'app:', 'user:' and 'temp:' are taken."
+  }
+  return null
+}
+
+/**
+ * Name this node's result so later nodes can read it.
+ *
+ * Shown for every node type rather than repeated in twenty forms. The value is
+ * written to workflow state as a top-level key — the same place an agent's
+ * `output_key` goes, and where ADK binds node parameters from.
+ */
+function VariableField({ nodeType, cfg, save }: FormProps & { nodeType: string }) {
+  if (NO_VARIABLE.has(nodeType)) return null
+
+  const name = String(cfg.output_variable || '')
+  const problem = variableProblem(name)
+
+  return (
+    <section className="space-y-3">
+      <SectionLabel>Variable</SectionLabel>
+      <Field label="Save result as">
+        <TextInput
+          value={name}
+          onChange={(v) => save({ ...cfg, output_variable: v || undefined })}
+          placeholder="priced_order  (optional)"
+          mono
+        />
+        {problem ? (
+          <p className="text-[10px] text-red-500 mt-1">{problem}</p>
+        ) : name ? (
+          <p className="text-[10px] text-gray-400 mt-1">
+            Later nodes read it as <code className="bg-gray-100 px-0.5 rounded">vars[&apos;{name}&apos;]</code> in a
+            Transform expression or a Condition branch.
+          </p>
+        ) : (
+          <p className="text-[10px] text-gray-400 mt-1">
+            Leave empty and this node&apos;s result only reaches the next node
+            along the edge.
+          </p>
+        )}
+      </Field>
+    </section>
+  )
+}
+
+/* ─── Wait ─────────────────────────────────────────────────────────────────── */
+
+const WAIT_UNIT_SECONDS: Record<string, number> = { seconds: 1, minutes: 60 }
+// Matches app/nodes/tasks/wait.py.
+const WAIT_MAX_SECONDS = 3600
+const WAIT_BLOCKING_COMFORT = 60
+
+function WaitForm({ cfg, save }: FormProps) {
+  const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
+  const unit = String(cfg.unit || 'seconds')
+  const duration = Number(cfg.duration ?? 5)
+  const seconds = duration * (WAIT_UNIT_SECONDS[unit] ?? 1)
+
+  return (
+    <section className="space-y-3">
+      <SectionLabel>Wait</SectionLabel>
+      <p className="text-[10px] text-slate-700 bg-slate-100 border border-slate-200 rounded-md px-2 py-1.5 leading-relaxed">
+        The run pauses here and carries on by itself. Other parallel branches
+        keep running meanwhile — the wait does not hold them up.
+      </p>
+
+      <Field label="Wait for">
+        <div className="flex gap-2">
+          <div className="flex-1">
+            <NumberInput
+              value={duration}
+              onChange={(v) => s('duration', v)}
+              min={0}
+              max={WAIT_MAX_SECONDS}
+            />
+          </div>
+          <div className="flex-1">
+            <Select
+              value={unit}
+              onChange={(v) => s('unit', v)}
+              options={[
+                { value: 'seconds', label: 'seconds' },
+                { value: 'minutes', label: 'minutes' },
+              ]}
+            />
+          </div>
+        </div>
+        {seconds <= 0 ? (
+          <p className="text-[10px] text-red-500 mt-1">
+            Set a duration, or remove the node — this would not wait at all.
+          </p>
+        ) : (
+          <p className="text-[10px] text-gray-400 mt-1">
+            Pauses {seconds < 60 ? `${seconds}s` : `${(seconds / 60).toFixed(seconds % 60 ? 1 : 0)} min`} before the next node.
+          </p>
+        )}
+      </Field>
+
+      {seconds > WAIT_MAX_SECONDS && (
+        <p className="text-[10px] text-red-500">
+          Over the {WAIT_MAX_SECONDS / 60}-minute limit. A wait this long belongs
+          outside the workflow — have a scheduler start it later rather than
+          holding a run open.
+        </p>
+      )}
+      {seconds > WAIT_BLOCKING_COMFORT && seconds <= WAIT_MAX_SECONDS && (
+        <p className="text-[10px] text-amber-600">
+          A blocking caller holds its connection open for the whole wait. Run
+          this workflow in <strong>Task</strong> mode and poll for the result.
+        </p>
+      )}
+
+      <p className="text-[10px] text-gray-400 leading-relaxed">
+        The wait is held in the running process, so a restart loses it. ADK has
+        no timer of its own; this node&apos;s execution timeout is raised to
+        cover the wait so it is not killed part way through.
+      </p>
     </section>
   )
 }
@@ -1411,13 +1750,77 @@ function SubworkflowForm({ cfg, save }: FormProps) {
 
 /* ─── Parallel Fork ────────────────────────────────────────────────────────── */
 
-function ParallelForkForm({ cfg, save }: FormProps) {
+function ParallelForkForm({ cfg, save, nodeId }: FormProps & { nodeId: string }) {
+  const edges = useWorkflowStore((st) => st.edges)
+  const branches: string[] = (cfg.branches as string[]) || []
+  const wired = new Set(
+    edges.filter((e) => e.source === nodeId).map((e) => e.sourceHandle || 'output'),
+  )
+
+  const update = (next: string[]) => save({ ...cfg, branches: next })
+  const add = () => update([...branches, `branch_${branches.length + 1}`])
+  const rename = (i: number, name: string) =>
+    update(branches.map((b, j) => (j === i ? name : b)))
+  const remove = (i: number) => update(branches.filter((_, j) => j !== i))
+
   return (
     <section className="space-y-3">
-      <SectionLabel>Parallel Fork</SectionLabel>
+      <SectionLabel>Parallel Branches</SectionLabel>
       <p className="text-[10px] text-gray-400">
-        Draw edges from this node to each branch. All branches run in parallel.
-        Connect their outputs to a <strong>Merge</strong> node.
+        Every branch runs at the same time, each receiving this node's input
+        unchanged. Drag from a handle on the right of the node to wire one up —
+        a fresh handle appears each time, so you never run out. All branches
+        must rejoin at a <strong>Merge</strong> node.
+      </p>
+
+      {branches.length < 2 && (
+        <p className="text-[10px] text-red-500">
+          A fork needs at least two branches; with one there is nothing to run
+          in parallel.
+        </p>
+      )}
+
+      {branches.map((name, i) => {
+        const duplicate = branches.indexOf(name) !== i
+        return (
+          <div key={i} className="flex items-center gap-1">
+            <span
+              className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                wired.has(name) ? 'bg-teal-500' : 'bg-gray-300'
+              }`}
+              title={wired.has(name) ? 'connected' : 'nothing connected yet'}
+            />
+            <input
+              value={name}
+              onChange={(e) => rename(i, e.target.value)}
+              placeholder="branch name (used as the edge handle)"
+              className={`flex-1 text-[10px] font-mono px-1.5 py-1 border rounded focus:outline-none focus:ring-1 min-w-0 ${
+                !name.trim() || duplicate
+                  ? 'border-red-300 bg-red-50 focus:ring-red-400'
+                  : 'border-teal-200 focus:ring-teal-400'
+              }`}
+            />
+            <button
+              onClick={() => remove(i)}
+              className="text-red-300 hover:text-red-500 flex-shrink-0"
+              title={wired.has(name) ? 'removing this leaves its edge dangling' : 'remove'}
+            >
+              <Minus size={11} />
+            </button>
+          </div>
+        )
+      })}
+
+      <button
+        onClick={add}
+        className="w-full text-[10px] py-1.5 border border-dashed border-teal-300 text-teal-500 rounded-md hover:bg-teal-50 flex items-center justify-center gap-1"
+      >
+        <Plus size={11} /> Add branch
+      </button>
+
+      <p className="text-[10px] text-gray-400">
+        Renaming a branch that is already wired changes the handle its edge
+        points at — redraw that edge afterwards.
       </p>
     </section>
   )
@@ -1430,17 +1833,35 @@ function MergeForm({ cfg, save }: FormProps) {
   return (
     <section className="space-y-3">
       <SectionLabel>Merge</SectionLabel>
-      <Field label="Strategy">
+      <p className="text-[10px] text-gray-400">
+        Where the branches of a <strong>Parallel Fork</strong> come back
+        together. Every branch must reach this node, and it always waits for
+        all of them — that comes from ADK's join node and is not a setting.
+      </p>
+      {/* There used to be a Strategy control here offering all / first / any.
+          None of the three was even in the schema's enum, so any Merge touched
+          in this panel failed to compile; and "continue on the first" was never
+          possible anyway. Saved canvases are cleaned up in the v6 -> v7
+          migration. */}
+      <Field label="Combine branches">
         <Select
-          value={String(cfg.strategy || 'all')}
-          onChange={(v) => s('strategy', v)}
+          value={String(cfg.merge_mode || 'merge')}
+          onChange={(v) => s('merge_mode', v)}
           options={[
-            { value: 'all',   label: 'All — wait for every branch' },
-            { value: 'first', label: 'First — use fastest result'  },
-            { value: 'any',   label: 'Any — use first N results'   },
+            { value: 'merge', label: 'Merge — one object with every branch\u2019s keys' },
+            { value: 'array', label: 'Array — results[] in branch order' },
+            { value: 'first', label: 'First — only the first branch\u2019s output' },
           ]}
         />
+        <p className="text-[10px] text-gray-400 mt-1">
+          {cfg.merge_mode === 'array'
+            ? 'The next node reads data.results — a list, in the order the branches leave the fork.'
+            : cfg.merge_mode === 'first'
+            ? 'The other branches still run; their output is dropped here.'
+            : 'Two branches producing the same key: the later one wins.'}
+        </p>
       </Field>
     </section>
   )
 }
+

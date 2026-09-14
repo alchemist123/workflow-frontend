@@ -51,6 +51,15 @@ const WorkflowNode = memo(({ data, id, selected }: NodeProps) => {
   const nodeType = nodeData.type as string
   const palette = PALETTE_BY_TYPE[nodeType]
   const nodeStatus = useWorkflowStore((s) => s.nodeStatus[id])
+  // Only a fork needs this, and it is selected as a joined string so the
+  // comparison stays a primitive — subscribing every node to the edge array
+  // would re-render the whole canvas on every edge change.
+  const usedHandles = useWorkflowStore((s) =>
+    (data as WorkflowNodeData).type === 'PARALLEL_FORK'
+      ? s.edges.filter((e) => e.source === id)
+          .map((e) => e.sourceHandle || 'output').join(',')
+      : '',
+  )
 
   // A node type the palette does not know about. Returning null here drew
   // nothing at all: the node occupied space, took no handles, and its edges
@@ -80,7 +89,13 @@ const WorkflowNode = memo(({ data, id, selected }: NodeProps) => {
     nodeType,
     (nodeData.config || {}) as Record<string, unknown>,
     palette.output_handles,
+    usedHandles ? usedHandles.split(',') : [],
   )
+  // A fork or a condition has several right-hand handles that are only
+  // distinguishable by name, so name them on the node rather than in a tooltip
+  // nobody hovers over.
+  const labelHandles = nodeType === 'PARALLEL_FORK' || nodeType === 'CONDITION'
+
 
   const borderColor = nodeStatus === 'success'
     ? 'border-green-400 shadow-green-100'
@@ -92,7 +107,7 @@ const WorkflowNode = memo(({ data, id, selected }: NodeProps) => {
 
   return (
     <div
-      className={`rounded-xl shadow-lg border-2 min-w-[180px] transition-all relative ${borderColor}`}
+      className={`rounded-xl shadow-lg border-2 transition-all relative ${borderColor} ${labelHandles ? 'min-w-[230px]' : 'min-w-[180px]'}`}
       style={{ background: '#fff' }}
     >
       {nodeStatus && <NodeStatusBadge status={nodeStatus} />}
@@ -138,10 +153,32 @@ const WorkflowNode = memo(({ data, id, selected }: NodeProps) => {
       {!palette.is_terminal && outputHandles.map((handle, i) => {
         const total = outputHandles.length
         const topPct = total === 1 ? 50 : 20 + (60 / (total - 1)) * i
+        // The spare handle on a fork is not a branch yet — drawn hollow so it
+        // reads as "drag another one from here" rather than as a wired branch.
+        const spare = nodeType === 'PARALLEL_FORK' && i === total - 1
+          && !usedHandles.split(',').includes(handle)
         return (
-          <Handle key={handle} type="source" position={Position.Right} id={handle}
-            style={{ background: palette.color, border: '2px solid white', top: `${topPct}%` }}
-            title={handle} />
+          <React.Fragment key={handle}>
+            <Handle type="source" position={Position.Right} id={handle}
+              style={{
+                background: spare ? '#fff' : palette.color,
+                border: `2px solid ${spare ? palette.color : '#fff'}`,
+                top: `${topPct}%`,
+              }}
+              title={spare ? `${handle} — drag to add a branch` : handle} />
+            {labelHandles && (
+              <span
+                className="absolute text-[9px] font-mono pointer-events-none truncate max-w-[90px]"
+                style={{
+                  top: `${topPct}%`, right: 8,
+                  transform: 'translateY(-50%)',
+                  color: spare ? '#9ca3af' : palette.color,
+                }}
+              >
+                {handle}
+              </span>
+            )}
+          </React.Fragment>
         )
       })}
     </div>
@@ -161,6 +198,11 @@ WorkflowNode.displayName = 'WorkflowNode'
  * perfectly. PARALLEL_FORK was worse: it declares no handles at all, so none
  * of its edges could ever be drawn.
  *
+ * A fork also gets one spare handle below the ones in use, so another branch
+ * can always be dragged out without opening the config panel first. Wiring it
+ * names the branch (see `syncForkBranches` in the store), which grows the list
+ * again — so the node keeps offering exactly one more than you have used.
+ *
  * Falls back to the palette so a legacy CONDITION with no branches still shows
  * its true/false/default.
  */
@@ -168,12 +210,24 @@ function outputHandlesFor(
   nodeType: string,
   config: Record<string, unknown>,
   paletteHandles: string[],
+  usedHandles: string[] = [],
 ): string[] {
   if (nodeType === 'CONDITION' || nodeType === 'PARALLEL_FORK') {
-    const branches = config.branches as Array<{ name?: string }> | undefined
+    // The two declare branches differently: CONDITION as {name, expression}
+    // objects, PARALLEL_FORK as plain strings. Reading only the object form
+    // left PARALLEL_FORK with no handles at all, so none of its edges drew.
+    const branches = config.branches as Array<string | { name?: string }> | undefined
     const named = (branches || [])
-      .map((b) => (b?.name || '').trim())
+      .map((b) => (typeof b === 'string' ? b : b?.name || '').trim())
       .filter(Boolean)
+
+    if (nodeType === 'PARALLEL_FORK') {
+      // An edge drawn from a handle the config has not caught up with yet
+      // still needs somewhere to land.
+      const all = [...named, ...usedHandles.filter((h) => h && !named.includes(h))]
+      const spare = `branch_${all.length + 1}`
+      return [...new Set([...all, spare])]
+    }
     if (named.length) return [...new Set(named)]
   }
   return paletteHandles
@@ -309,7 +363,7 @@ export const buildNodeTypes = (): Record<string, React.ComponentType<NodeProps>>
     'A2A_START',
     'SEQUENTIAL_AGENT', 'PARALLEL_AGENT',
     'REMOTE_AGENT', 'FUNCTION', 'AGENT', 'LLM_AGENT', 'TOOL',
-    'CONDITION', 'LOOP', 'TRANSFORM', 'END',
+    'CONDITION', 'LOOP', 'WAIT', 'TRANSFORM', 'END',
     'DATASOURCE', 'HUMAN_APPROVAL', 'HUMAN_INPUT', 'SUBWORKFLOW', 'PARALLEL_FORK', 'MERGE',
   ]
   for (const t of generic) {

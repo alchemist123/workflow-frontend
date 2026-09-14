@@ -93,6 +93,12 @@ export const STATIC_PALETTE: StaticPaletteNode[] = [
     wave: 1, is_trigger: false, is_terminal: false, output_handles: ['loop_body', 'done'],
   },
   {
+    type: 'WAIT', label: 'Wait', category: 'flow',
+    color: '#64748b', icon: 'Timer',
+    description: 'Pause for a fixed time, then continue — held in the running process',
+    wave: 1, is_trigger: false, is_terminal: false, output_handles: ['output'],
+  },
+  {
     type: 'TRANSFORM', label: 'Transform', category: 'flow',
     color: '#64748b', icon: 'Shuffle', description: 'Reshape data',
     wave: 1, is_trigger: false, is_terminal: false, output_handles: ['output'],

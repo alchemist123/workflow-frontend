@@ -6,6 +6,15 @@ import type {
 
 const api = axios.create({ baseURL: '/api/v1' })
 
+/** One thing a node can read, as offered by the mapping picker. */
+export interface NodeInput {
+  path: string
+  type: string
+  source: 'payload' | 'variable'
+  from_node: string
+  label: string
+}
+
 export const workflowApi = {
   list: () => api.get<Workflow[]>('/workflows').then(r => r.data),
   create: (name: string, description = '') =>
@@ -43,6 +52,17 @@ export const workflowApi = {
     api.post<WorkflowExecution>(
       `/workflows/${workflowId}/executions/${executionId}/answer`,
       { response },
+    ).then(r => r.data),
+
+  /**
+   * What a node can read, for the field-mapping picker.
+   *
+   * Takes the live canvas rather than a saved version: the picker is used
+   * while editing, before anything is saved.
+   */
+  nodeInputs: (canvas: unknown, nodeId: string) =>
+    api.post<{ inputs: NodeInput[]; opaque: boolean }>(
+      '/workflows/node-inputs', { canvas, node_id: nodeId },
     ).then(r => r.data),
 
   listExecutions: (workflowId: string) =>

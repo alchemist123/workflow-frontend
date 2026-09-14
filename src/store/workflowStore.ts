@@ -65,6 +65,45 @@ interface WorkflowState {
 
 let nodeCounter = 0
 
+/**
+ * Config a node needs before it can be wired at all.
+ *
+ * Almost every node type is usable straight out of the palette and is
+ * configured afterwards. PARALLEL_FORK was not: its outgoing handles come from
+ * `branches`, so dropping one with an empty config gave a node with no handles
+ * on its right-hand side — nothing to drag an edge from — and it could not
+ * compile either, since the schema requires at least two branches.
+ */
+const DEFAULT_CONFIG: Record<string, Record<string, unknown>> = {
+  PARALLEL_FORK: { branches: ['branch_1', 'branch_2'] },
+}
+
+/**
+ * Keep a fork's branch list in sync with the edges actually drawn from it.
+ *
+ * The canvas is the source of truth for the wiring, and the config has to
+ * agree with it or the compiler sees branches nobody connected. Additive on
+ * purpose: drawing an edge from a new handle names that branch, but deleting
+ * the edge leaves the branch in place — removing it is an explicit act in the
+ * config panel, not a side effect of re-routing an edge.
+ */
+function syncForkBranches(nodes: Node[], edges: Edge[]): Node[] {
+  let changed = false
+  const next = nodes.map((node) => {
+    if (node.type !== 'PARALLEL_FORK') return node
+    const config = ((node.data as { config?: Record<string, unknown> })?.config || {})
+    const branches = (config.branches as string[]) || []
+    const used = edges
+      .filter((e) => e.source === node.id)
+      .map((e) => e.sourceHandle || 'output')
+    const merged = [...branches, ...used.filter((h) => !branches.includes(h))]
+    if (merged.length === branches.length) return node
+    changed = true
+    return { ...node, data: { ...node.data, config: { ...config, branches: merged } } }
+  })
+  return changed ? next : nodes
+}
+
 export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   nodes: [],
   edges: [],
@@ -88,7 +127,10 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
 
   onEdgesChange: (changes) => {
-    set((state) => ({ edges: applyEdgeChanges(changes, state.edges) }))
+    set((state) => {
+      const edges = applyEdgeChanges(changes, state.edges)
+      return { edges, nodes: syncForkBranches(state.nodes, edges) }
+    })
   },
 
   onConnect: (connection) => {
@@ -100,7 +142,10 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       sourceHandle: connection.sourceHandle,
       targetHandle: connection.targetHandle,
     }
-    set((state) => ({ edges: addEdge(edge, state.edges) }))
+    set((state) => {
+      const edges = addEdge(edge, state.edges)
+      return { edges, nodes: syncForkBranches(state.nodes, edges) }
+    })
   },
 
   addNode: (type, position) => {
@@ -112,7 +157,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       data: {
         type,
         metadata: { title: type.replace(/_/g, ' '), description: '' },
-        config: {},
+        config: { ...(DEFAULT_CONFIG[type] || {}) },
         io: { input_schema: { type: 'object' }, output_schema: { type: 'object' } },
         policies: { timeout_seconds: 60, retry: { max_attempts: 1 }, on_error: 'fail' },
       },
