@@ -42,6 +42,8 @@ export interface CanvasEdge {
 export interface CanvasPayload {
   nodes: CanvasNode[]
   edges: CanvasEdge[]
+  // Set by the backend; canvases saved before A2A_START are migrated on read.
+  schema_version?: number
 }
 
 export interface PaletteNode {
@@ -85,6 +87,7 @@ export interface CompileResponse {
   version_id: string
   is_valid: boolean
   errors: string[]
+  warnings: string[]
   ir: Record<string, unknown> | null
 }
 
@@ -102,3 +105,36 @@ export interface WorkflowExecution {
 }
 
 export type NodeCategory = 'triggers' | 'flow' | 'ai' | 'data'
+
+/** How a test run invokes the packaged agent. */
+export type RunMode = 'message' | 'task'
+
+/**
+ * What a test run records in WorkflowExecution.output.
+ *
+ * The run is driven over the package's own A2A surface, so `a2a` carries the
+ * task lifecycle a real caller would see and `result` is the workflow's answer
+ * decoded from the task's result artifact.
+ */
+export interface TestRunOutput {
+  result: unknown
+  a2a: {
+    task_id: string | null
+    state: string
+    mode: RunMode
+    polls: number
+  }
+  duration_ms: number
+  package_dir: string | null
+  warnings: string[]
+  /** Present when the run parked on a HUMAN_APPROVAL node. */
+  input_required?: {
+    interrupt_id: string
+    prompt: string
+    response_schema: {
+      properties?: Record<string, { type?: string; description?: string }>
+      required?: string[]
+    } | null
+    payload?: { assignees?: string[]; required_fields?: string[]; data?: unknown } | null
+  } | null
+}

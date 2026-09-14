@@ -3,10 +3,10 @@ import {
   Save, Play, Package, CheckCircle, XCircle,
   Loader2, List, ArrowLeft, ChevronDown, X,
   Terminal, Copy, Check, RefreshCw, Clock, AlertCircle,
-  ChevronRight, FolderOpen,
+  ChevronRight, FolderOpen, UserCheck,
 } from 'lucide-react'
 import { useWorkflowStore } from '../../store/workflowStore'
-import type { WorkflowExecution } from '../../types/workflow'
+import type { RunMode, TestRunOutput, WorkflowExecution } from '../../types/workflow'
 
 interface ToolbarProps {
   onBack: () => void
@@ -18,15 +18,18 @@ export default function Toolbar({ onBack }: ToolbarProps) {
     nodes,
     isSaving, isExecuting, isPackaging,
     lastCompile, compileErrors, compileWarnings, packageResult,
-    saveAndCompile, executeWorkflow, packageWorkflow,
+    saveAndCompile, testWorkflow, packageWorkflow,
+    runMode, setRunMode,
     loadExecutions, executions,
     clearPackageResult,
     loadNodeLogs, clearNodeStatus,
   } = useWorkflowStore()
 
-  // Read body schema from the HTTP trigger node in the canvas
-  const httpTriggerCfg = (nodes.find((n) => n.type === 'HTTP_TRIGGER')?.data?.config || {}) as Record<string, unknown>
-  const bodySchema = (httpTriggerCfg.body_schema as { fields?: BodyField[] } | undefined)
+  // The payload contract comes from the A2A_START node — it is what the packaged
+  // agent advertises, so the Run panel and real callers see the same fields.
+  const startCfg = (nodes.find((n) => n.type === 'A2A_START')?.data?.config || {}) as Record<string, unknown>
+  const payloadSchema = (startCfg.payload_schema as { fields?: PayloadField[] } | undefined)
+  const payloadFields = startCfg.input_mode === 'text' ? [] : (payloadSchema?.fields || [])
 
   const [showErrors, setShowErrors] = useState(false)
   const [showExecs, setShowExecs] = useState(false)
@@ -82,9 +85,10 @@ export default function Toolbar({ onBack }: ToolbarProps) {
     setShowRunModal(true)
   }
 
-  const handleRunWithPayload = async (body: Record<string, unknown>) => {
+  const handleRunWithPayload = async (body: Record<string, unknown>, mode: RunMode) => {
     setShowRunModal(false)
-    const exec = await executeWorkflow(body)
+    setRunMode(mode)
+    const exec = await testWorkflow(body, mode)
     if (exec) {
       setShowExecs(true)
       setSelectedExec(exec)
@@ -326,7 +330,8 @@ export default function Toolbar({ onBack }: ToolbarProps) {
       {/* ── Run input modal ── */}
       {showRunModal && (
         <RunInputModal
-          fields={bodySchema?.fields || []}
+          fields={payloadFields}
+          mode={runMode}
           onRun={handleRunWithPayload}
           onCancel={() => setShowRunModal(false)}
         />
@@ -363,7 +368,144 @@ function ExecStatusIcon({ status }: { status: string }) {
   return <AlertCircle size={14} className="text-gray-400 flex-shrink-0" />
 }
 
+/**
+ * Answer a run parked on a HUMAN_APPROVAL or HUMAN_INPUT node.
+ *
+ * One panel for both, because the task tells it which it is: an approval
+ * advertises an `approved` field in its schema, an input request does not. So
+ * this renders two decision buttons or one Submit, and the input fields come
+ * from the schema either way — nothing about the workflow is hardcoded here.
+ *
+ * Answering resumes the parked task rather than replaying the workflow: the
+ * package keeps the A2A task and the ADK session on disk, so the run carries
+ * on from the node that paused.
+ */
+function ApprovalPanel({ exec, pending }: {
+  exec: WorkflowExecution
+  pending: NonNullable<TestRunOutput['input_required']>
+}) {
+  const answerExecution = useWorkflowStore((s) => s.answerExecution)
+  const [values, setValues] = useState<Record<string, string>>({})
+  const [busy, setBusy] = useState<'approved' | 'rejected' | 'submitted' | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const properties = pending.response_schema?.properties || {}
+  const extras = Object.entries(properties).filter(([name]) => name !== 'approved')
+  // A decision if the task asks for one; otherwise it just wants values.
+  const isDecision = 'approved' in properties
+  // The node enforces these and asks again if they are missing, so checking
+  // here only saves the user a round trip.
+  const required = pending.payload?.required_fields || []
+
+  const collect = () => {
+    const response: Record<string, unknown> = {}
+    for (const [name, spec] of extras) {
+      const raw = values[name]
+      if (raw === undefined || raw === '') continue
+      response[name] = spec.type === 'number' || spec.type === 'integer' ? Number(raw) : raw
+    }
+    return response
+  }
+
+  const submit = async (approved: boolean | null) => {
+    const response = collect()
+    // Only an approval needs the required values; a rejection never does.
+    if (approved !== false) {
+      const missing = required.filter((name) => response[name] === undefined)
+      if (missing.length) {
+        setError(`Still needed: ${missing.join(', ')}`)
+        return
+      }
+    }
+    setBusy(approved === null ? 'submitted' : approved ? 'approved' : 'rejected')
+    setError(null)
+    if (approved !== null) response.approved = approved
+    const updated = await answerExecution(exec.id, response)
+    setBusy(null)
+    if (!updated) setError('The answer could not be submitted.')
+  }
+
+  return (
+    <div className="bg-purple-50 border border-purple-200 rounded-lg p-3 space-y-3">
+      <div className="flex items-center gap-1.5">
+        <UserCheck size={13} className="text-purple-600 flex-shrink-0" />
+        <p className="text-[10px] font-semibold text-purple-600 uppercase tracking-wider">
+          {isDecision ? 'Waiting for a decision' : 'Waiting for input'}
+        </p>
+      </div>
+
+      <p className="text-xs text-gray-800 leading-relaxed">{pending.prompt}</p>
+
+      {!!pending.payload?.assignees?.length && (
+        <p className="text-[10px] text-gray-500">
+          Assigned to {pending.payload.assignees.join(', ')}
+        </p>
+      )}
+
+      {extras.map(([name, spec]) => (
+        <div key={name}>
+          <label className="text-[10px] font-semibold text-gray-600 font-mono">
+            {name}
+            {required.includes(name) && <span className="text-red-400 ml-0.5">*</span>}
+          </label>
+          {spec.description && (
+            <p className="text-[10px] text-gray-400 mb-1">{spec.description}</p>
+          )}
+          <input
+            value={values[name] || ''}
+            onChange={(e) => setValues((v) => ({ ...v, [name]: e.target.value }))}
+            type={spec.type === 'number' || spec.type === 'integer' ? 'number' : 'text'}
+            placeholder={name === 'comment' ? 'Optional note' : `Enter ${name}…`}
+            className="w-full text-xs px-2 py-1.5 border border-purple-200 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-purple-400"
+          />
+        </div>
+      ))}
+
+      {error && <p className="text-[10px] text-red-600">{error}</p>}
+
+      {isDecision ? (
+        <div className="flex gap-2">
+          <button
+            onClick={() => submit(true)}
+            disabled={busy !== null}
+            className="flex-1 flex items-center justify-center gap-1 py-1.5 text-xs font-semibold rounded-md bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white transition-colors"
+          >
+            {busy === 'approved' ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+            Approve
+          </button>
+          <button
+            onClick={() => submit(false)}
+            disabled={busy !== null}
+            className="flex-1 flex items-center justify-center gap-1 py-1.5 text-xs font-semibold rounded-md bg-white border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-50 transition-colors"
+          >
+            {busy === 'rejected' ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
+            Reject
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={() => submit(null)}
+          disabled={busy !== null}
+          className="w-full flex items-center justify-center gap-1 py-1.5 text-xs font-semibold rounded-md bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white transition-colors"
+        >
+          {busy === 'submitted' ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+          Submit
+        </button>
+      )}
+
+      <p className="text-[10px] text-gray-400 leading-relaxed">
+        The run carries on from this step. Nothing before it runs again.
+      </p>
+    </div>
+  )
+}
+
 function ExecutionDetail({ exec, workflowId: _workflowId }: { exec: WorkflowExecution; workflowId: string }) {
+  // A test run records an A2A envelope; older engine runs recorded a map of
+  // node id -> output. The `a2a` key tells them apart.
+  const output = exec.output as unknown as TestRunOutput | null
+  const testRun = output && output.a2a ? output : null
+
   const duration = exec.started_at && exec.finished_at
     ? ((new Date(exec.finished_at).getTime() - new Date(exec.started_at).getTime()) / 1000).toFixed(1) + 's'
     : exec.status === 'running' ? 'running…' : '—'
@@ -389,12 +531,69 @@ function ExecutionDetail({ exec, workflowId: _workflowId }: { exec: WorkflowExec
         {(exec.status === 'running' || exec.status === 'pending') && !exec.output && (
           <div className="flex items-center gap-2 py-8 justify-center text-gray-400 text-xs">
             <Loader2 size={16} className="animate-spin" />
-            <span>Executing workflow…</span>
+            <span>Running the packaged agent…</span>
           </div>
         )}
 
-        {/* Node outputs */}
-        {exec.output && Object.keys(exec.output).length > 0 && (
+        {/* Parked on a human. Shown first: it is the only thing on this panel
+            the reader can act on. */}
+        {testRun?.input_required && exec.status === 'waiting' && (
+          <ApprovalPanel exec={exec} pending={testRun.input_required} />
+        )}
+
+        {/* A2A task lifecycle — a test run drives the package over A2A, so this
+            is what a real caller would have seen. */}
+        {testRun && (
+          <div>
+            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-2">
+              A2A task
+            </p>
+            <div className="bg-gray-50 border border-gray-200 rounded-lg divide-y divide-gray-200">
+              <DetailRow label="State" value={
+                <span className={`font-semibold ${a2aStateColor(testRun.a2a.state)}`}>
+                  {testRun.a2a.state}
+                </span>
+              } />
+              <DetailRow label="Invocation" value={
+                testRun.a2a.mode === 'task'
+                  ? `task · ${testRun.a2a.polls} poll${testRun.a2a.polls === 1 ? '' : 's'}`
+                  : 'message (blocking)'
+              } />
+              {testRun.a2a.task_id && (
+                <DetailRow label="Task id" value={
+                  <span className="font-mono text-[10px] break-all">{testRun.a2a.task_id}</span>
+                } />
+              )}
+              {!!testRun.duration_ms && (
+                <DetailRow label="Took" value={`${(testRun.duration_ms / 1000).toFixed(2)}s`} />
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Result — decoded from the task's result artifact */}
+        {testRun && testRun.result !== null && testRun.result !== undefined && (
+          <div>
+            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Result</p>
+            <pre className="bg-gray-900 rounded-lg p-3 text-[10px] font-mono text-green-300 whitespace-pre-wrap break-words overflow-auto max-h-64">
+              {JSON.stringify(testRun.result, null, 2)}
+            </pre>
+          </div>
+        )}
+
+        {testRun && testRun.warnings.length > 0 && (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+            <p className="text-[10px] font-semibold text-amber-600 uppercase tracking-wider mb-1">
+              Build warnings
+            </p>
+            <ul className="text-[11px] text-amber-800 space-y-0.5 list-disc list-inside">
+              {testRun.warnings.map((w, i) => <li key={i}>{w}</li>)}
+            </ul>
+          </div>
+        )}
+
+        {/* Node outputs — the shape older engine runs recorded */}
+        {!testRun && exec.output && Object.keys(exec.output).length > 0 && (
           <div>
             <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-2">Output</p>
             <div className="space-y-2">
@@ -410,7 +609,13 @@ function ExecutionDetail({ exec, workflowId: _workflowId }: { exec: WorkflowExec
           <div>
             <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Trigger Input</p>
             <pre className="bg-gray-50 rounded-lg p-3 text-[10px] font-mono text-gray-600 whitespace-pre-wrap break-words overflow-auto max-h-32">
-              {JSON.stringify((exec.trigger_payload as Record<string, unknown>).body ?? exec.trigger_payload, null, 2)}
+              {JSON.stringify(
+                (exec.trigger_payload as Record<string, unknown>).payload
+                  ?? (exec.trigger_payload as Record<string, unknown>).body
+                  ?? exec.trigger_payload,
+                null,
+                2,
+              )}
             </pre>
           </div>
         )}
@@ -423,6 +628,22 @@ function ExecutionDetail({ exec, workflowId: _workflowId }: { exec: WorkflowExec
       </div>
     </div>
   )
+}
+
+function DetailRow({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 px-3 py-1.5">
+      <span className="text-[10px] text-gray-400 uppercase tracking-wider flex-shrink-0">{label}</span>
+      <span className="text-[11px] text-gray-700 text-right min-w-0">{value}</span>
+    </div>
+  )
+}
+
+function a2aStateColor(state: string): string {
+  if (state === 'completed') return 'text-green-600'
+  if (state === 'failed' || state === 'rejected') return 'text-red-600'
+  if (state === 'canceled') return 'text-gray-500'
+  return 'text-blue-600'
 }
 
 function NodeOutputCard({ nodeId, output }: { nodeId: string; output: Record<string, unknown> }) {
@@ -506,17 +727,22 @@ function NodeOutputCard({ nodeId, output }: { nodeId: string; output: Record<str
 
 /* ─── Run input modal ─────────────────────────────────────────────────────── */
 
-type BodyField = { name: string; type: string; description: string; required: boolean }
+type PayloadField = { name: string; type: string; description: string; required: boolean }
 
 function RunInputModal({
   fields,
+  mode: initialMode,
   onRun,
   onCancel,
 }: {
-  fields: BodyField[]
-  onRun: (body: Record<string, unknown>) => void
+  fields: PayloadField[]
+  mode: RunMode
+  onRun: (body: Record<string, unknown>, mode: RunMode) => void
   onCancel: () => void
 }) {
+  // How the packaged agent is invoked. Distinct from `mode` below, which is
+  // whether this modal shows a form or a raw JSON editor.
+  const [invokeMode, setInvokeMode] = useState<RunMode>(initialMode)
   const hasSchema = fields.length > 0
   // mode: 'form' when schema defined, 'json' always available as fallback
   const [mode, setMode] = useState<'form' | 'json'>(hasSchema ? 'form' : 'json')
@@ -530,6 +756,8 @@ function RunInputModal({
 
   const [jsonText, setJsonText] = useState('{\n  \n}')
   const [jsonError, setJsonError] = useState<string | null>(null)
+  // Per-field problems from the form's own type coercion, keyed by field name.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
 
   const validateJson = (text: string) => {
     if (!text.trim() || text.trim() === '{}') { setJsonError(null); return true }
@@ -561,19 +789,49 @@ function RunInputModal({
   const handleRun = () => {
     let body: Record<string, unknown> = {}
     if (mode === 'form') {
+      // Coerce each value to the type the field declares. Only number and
+      // integer used to be converted, so an `array` or `object` field was sent
+      // as the raw string — a workflow looping over `items` then received
+      // "[1, 2, 3]" instead of a list, iterated nothing, and still reported
+      // success.
+      const bad: Record<string, string> = {}
       for (const f of fields) {
         const v = formValues[f.name]
-        if (f.required || (v !== '' && v !== false)) {
-          body[f.name] = f.type === 'number' || f.type === 'integer' ? Number(v) : v
+        if (!f.required && (v === '' || v === false)) continue
+
+        if (f.type === 'number' || f.type === 'integer') {
+          body[f.name] = Number(v)
+        } else if (f.type === 'array' || f.type === 'object') {
+          const text = String(v ?? '').trim()
+          if (!text) {
+            body[f.name] = f.type === 'array' ? [] : {}
+            continue
+          }
+          try {
+            const parsed = JSON.parse(text)
+            const shapeOk = f.type === 'array' ? Array.isArray(parsed)
+              : parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+            if (!shapeOk) {
+              bad[f.name] = `Expected ${f.type === 'array' ? 'a JSON array' : 'a JSON object'}.`
+              continue
+            }
+            body[f.name] = parsed
+          } catch {
+            bad[f.name] = `Not valid JSON — write ${f.type === 'array' ? '[1, 2, 3]' : '{"key": "value"}'}.`
+          }
+        } else {
+          body[f.name] = v
         }
       }
+      setFieldErrors(bad)
+      if (Object.keys(bad).length > 0) return
     } else {
       if (jsonText.trim() && jsonText.trim() !== '{}') {
         if (!validateJson(jsonText)) return
         body = JSON.parse(jsonText)
       }
     }
-    onRun(body)
+    onRun(body, invokeMode)
   }
 
   const handleJsonKeyDown = (e: React.KeyboardEvent) => {
@@ -618,6 +876,39 @@ function RunInputModal({
 
         <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
 
+          {/* ── How to invoke the agent ── */}
+          <div>
+            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+              Invocation
+            </p>
+            <div className="flex gap-1.5">
+              {([
+                { value: 'message', label: 'Message', hint: 'Wait for the answer (blocking message/send)' },
+                { value: 'task', label: 'Task', hint: 'Submit, then poll tasks/get for the result' },
+              ] as const).map((option) => (
+                <button
+                  key={option.value}
+                  onClick={() => setInvokeMode(option.value)}
+                  title={option.hint}
+                  className={`flex-1 text-xs px-3 py-2 rounded-lg border transition-colors text-left ${
+                    invokeMode === option.value
+                      ? 'border-green-500 bg-green-50 text-green-800'
+                      : 'border-gray-200 text-gray-500 hover:border-gray-300'
+                  }`}
+                >
+                  <span className="font-semibold block">{option.label}</span>
+                  <span className="text-[10px] leading-tight block mt-0.5 opacity-80">
+                    {option.value === 'message' ? 'Wait for the answer' : 'Submit, then poll'}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-gray-400 mt-1.5">
+              Both drive the packaged agent over A2A. Task mode is what a caller
+              uses when a workflow is too slow to hold a connection open for.
+            </p>
+          </div>
+
           {/* ── Schema-driven form ── */}
           {mode === 'form' && hasSchema && (
             <div className="space-y-3">
@@ -657,6 +948,18 @@ function RunInputModal({
                       placeholder={`Enter ${f.name}…`}
                       className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-400"
                     />
+                  ) : f.type === 'array' || f.type === 'object' ? (
+                    <textarea
+                      value={String(formValues[f.name] || '')}
+                      onChange={(e) => setFormValues((v) => ({ ...v, [f.name]: e.target.value }))}
+                      rows={2}
+                      placeholder={f.type === 'array' ? '[1, 2, 3]' : '{"key": "value"}'}
+                      className={`w-full text-xs font-mono px-3 py-2 border rounded-lg resize-none focus:outline-none focus:ring-2 ${
+                        fieldErrors[f.name]
+                          ? 'border-red-300 focus:ring-red-400 bg-red-50'
+                          : 'border-gray-200 focus:ring-green-400'
+                      }`}
+                    />
                   ) : (
                     <input
                       type="text"
@@ -666,6 +969,9 @@ function RunInputModal({
                       autoFocus={fields.indexOf(f) === 0}
                       className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-400"
                     />
+                  )}
+                  {fieldErrors[f.name] && (
+                    <p className="text-[10px] text-red-500 mt-1">{fieldErrors[f.name]}</p>
                   )}
                 </div>
               ))}

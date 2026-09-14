@@ -17,25 +17,19 @@ export interface StaticPaletteNode {
 }
 
 export const STATIC_PALETTE: StaticPaletteNode[] = [
-  // ── Wave 1: Triggers ──────────────────────────────────────────────────────
+  // ── Wave 1: Entry ─────────────────────────────────────────────────────────
+  // A2A_START is the only entry node. The old HTTP / Schedule / Webhook / Queue
+  // triggers were removed when packaging moved to ADK graph workflows served
+  // over A2A: a packaged workflow is invoked by a message, not by a path or a
+  // cron. Saved canvases are migrated server-side on read.
   {
-    type: 'HTTP_TRIGGER', label: 'HTTP Trigger', category: 'triggers',
-    color: '#6366f1', icon: 'Webhook', description: 'Start via HTTP request',
-    wave: 1, is_trigger: true, is_terminal: false, output_handles: ['output'],
-  },
-  {
-    type: 'SCHEDULE_TRIGGER', label: 'Schedule', category: 'triggers',
-    color: '#8b5cf6', icon: 'Clock', description: 'Start on cron schedule',
-    wave: 1, is_trigger: true, is_terminal: false, output_handles: ['output'],
-  },
-  {
-    type: 'WEBHOOK_TRIGGER', label: 'Webhook', category: 'triggers',
-    color: '#06b6d4', icon: 'Zap', description: 'Start via unique webhook URL',
+    type: 'A2A_START', label: 'A2A Start', category: 'triggers',
+    color: '#6366f1', icon: 'Play', description: 'Entry point — receives the A2A payload',
     wave: 1, is_trigger: true, is_terminal: false, output_handles: ['output'],
   },
   // ── Wave 1: AI ─────────────────────────────────────────────────────────────
-  // Note: old 'AGENT' type is kept in the backend registry for backward compat
-  // but removed from the palette — use ORCHESTRATOR_AGENT + REMOTE_AGENT instead.
+  // Note: the old 'AGENT' type is kept in the backend registry for backward
+  // compatibility but is absent here — use ORCHESTRATOR_AGENT + REMOTE_AGENT.
   {
     type: 'ORCHESTRATOR_AGENT', label: 'Orchestrator Agent', category: 'ai',
     color: '#f59e0b', icon: 'BrainCircuit',
@@ -56,14 +50,35 @@ export const STATIC_PALETTE: StaticPaletteNode[] = [
     wave: 1, is_trigger: false, is_terminal: false, output_handles: ['output', 'error'],
   },
   {
-    type: 'MODEL', label: 'Model', category: 'ai',
-    color: '#10b981', icon: 'Brain', description: 'Direct LLM call',
+    // Both a tool consumer and a tool provider: give it MCP tools and remote
+    // agents, and wire it into another agent or a tool group as a sub-agent.
+    type: 'LLM_AGENT', label: 'LLM Agent', category: 'ai',
+    color: '#10b981', icon: 'Bot',
+    description: 'An LLM agent — run it in the flow, or connect it to another agent as a sub-agent',
     wave: 1, is_trigger: false, is_terminal: false, output_handles: ['output'],
+    tool_handles: ['tools'],
   },
   {
     type: 'TOOL', label: 'Tool', category: 'ai',
     color: '#3b82f6', icon: 'Wrench', description: 'Execute an MCP tool — standalone or connect to Orchestrator',
     wave: 1, is_trigger: false, is_terminal: false, output_handles: ['output', 'error'],
+  },
+  // ── Wave 1: Tool groups ───────────────────────────────────────────────────
+  // A group is a tool, not a graph node: wire tools into it, then wire it into
+  // an agent's tools handle. It replaces the old tool_execution_mode setting.
+  {
+    type: 'SEQUENTIAL_AGENT', label: 'Sequential Tools', category: 'ai',
+    color: '#0891b2', icon: 'ListOrdered',
+    description: 'Runs connected tools in a set order, one after another',
+    wave: 1, is_trigger: false, is_terminal: false, output_handles: ['output'],
+    tool_handles: ['tools'],
+  },
+  {
+    type: 'PARALLEL_AGENT', label: 'Parallel Tools', category: 'ai',
+    color: '#0d9488', icon: 'Rows3',
+    description: 'Runs connected tools at the same time on the same input',
+    wave: 1, is_trigger: false, is_terminal: false, output_handles: ['output'],
+    tool_handles: ['tools'],
   },
   // ── Wave 1: Flow ──────────────────────────────────────────────────────────
   {
@@ -73,7 +88,8 @@ export const STATIC_PALETTE: StaticPaletteNode[] = [
   },
   {
     type: 'LOOP', label: 'Loop', category: 'flow',
-    color: '#f97316', icon: 'RefreshCw', description: 'Iterate over a list',
+    color: '#f97316', icon: 'RefreshCw',
+    description: 'Iterate over a list, or repeat until a condition becomes true',
     wave: 1, is_trigger: false, is_terminal: false, output_handles: ['loop_body', 'done'],
   },
   {
@@ -86,17 +102,19 @@ export const STATIC_PALETTE: StaticPaletteNode[] = [
     color: '#1e293b', icon: 'Square', description: 'Terminate execution path',
     wave: 1, is_trigger: false, is_terminal: true, output_handles: [],
   },
-  // ── Wave 2: Triggers ──────────────────────────────────────────────────────
-  {
-    type: 'QUEUE_TRIGGER', label: 'Queue Trigger', category: 'triggers',
-    color: '#f43f5e', icon: 'Inbox', description: 'Start from queue message',
-    wave: 2, is_trigger: true, is_terminal: false, output_handles: ['output'],
-  },
   // ── Wave 2: Flow ──────────────────────────────────────────────────────────
   {
     type: 'HUMAN_APPROVAL', label: 'Human Approval', category: 'flow',
-    color: '#a855f7', icon: 'UserCheck', description: 'Wait for human sign-off',
+    color: '#a855f7', icon: 'UserCheck', description: 'Pause and ask a person — the A2A task waits at input-required',
     wave: 2, is_trigger: false, is_terminal: false, output_handles: ['approved', 'rejected'],
+  },
+  {
+    // The other half of human-in-the-loop: not a decision, but values the
+    // workflow needs. One way out, so the answer merges into the payload.
+    type: 'HUMAN_INPUT', label: 'Human Input', category: 'flow',
+    color: '#8b5cf6', icon: 'MessageSquare',
+    description: 'Pause and ask a person for values — the task waits at input-required',
+    wave: 2, is_trigger: false, is_terminal: false, output_handles: ['output'],
   },
   {
     type: 'SUBWORKFLOW', label: 'Sub-workflow', category: 'flow',

@@ -51,10 +51,36 @@ const WorkflowNode = memo(({ data, id, selected }: NodeProps) => {
   const nodeType = nodeData.type as string
   const palette = PALETTE_BY_TYPE[nodeType]
   const nodeStatus = useWorkflowStore((s) => s.nodeStatus[id])
-  if (!palette) return null
+
+  // A node type the palette does not know about. Returning null here drew
+  // nothing at all: the node occupied space, took no handles, and its edges
+  // vanished — which reads as a broken canvas rather than a missing entry.
+  // Say so instead.
+  if (!palette) {
+    return (
+      <div className="rounded-lg border-2 border-dashed border-amber-400 bg-amber-50 px-3 py-2 min-w-[150px]">
+        <p className="text-[10px] font-semibold text-amber-700 uppercase tracking-wider">
+          Unknown node type
+        </p>
+        <p className="text-xs font-mono text-amber-900">{nodeType || '(none)'}</p>
+        <p className="text-[10px] text-amber-600 mt-0.5">
+          This build has no palette entry for it, so it cannot be wired.
+        </p>
+        <Handle type="target" position={Position.Left} id="input"
+          style={{ background: '#f59e0b', border: '2px solid white' }} />
+        <Handle type="source" position={Position.Right} id="output"
+          style={{ background: '#f59e0b', border: '2px solid white' }} />
+      </div>
+    )
+  }
 
   const title = (nodeData.metadata as { title?: string })?.title || palette.label
   const description = (nodeData.metadata as { description?: string })?.description
+  const outputHandles = outputHandlesFor(
+    nodeType,
+    (nodeData.config || {}) as Record<string, unknown>,
+    palette.output_handles,
+  )
 
   const borderColor = nodeStatus === 'success'
     ? 'border-green-400 shadow-green-100'
@@ -109,8 +135,8 @@ const WorkflowNode = memo(({ data, id, selected }: NodeProps) => {
         )
       })}
 
-      {!palette.is_terminal && palette.output_handles.map((handle, i) => {
-        const total = palette.output_handles.length
+      {!palette.is_terminal && outputHandles.map((handle, i) => {
+        const total = outputHandles.length
         const topPct = total === 1 ? 50 : 20 + (60 / (total - 1)) * i
         return (
           <Handle key={handle} type="source" position={Position.Right} id={handle}
@@ -125,11 +151,42 @@ WorkflowNode.displayName = 'WorkflowNode'
 
 // ── Orchestrator Agent (specialized — shows connected tools live) ──────────────
 
+/**
+ * The outgoing handles a node actually has.
+ *
+ * CONDITION and PARALLEL_FORK name their own branches in config, so their
+ * handles cannot be a fixed list. Reading the palette's instead meant any edge
+ * leaving a custom-named branch had no handle to attach to and ReactFlow
+ * simply did not draw it — a canvas that looked half-wired while compiling
+ * perfectly. PARALLEL_FORK was worse: it declares no handles at all, so none
+ * of its edges could ever be drawn.
+ *
+ * Falls back to the palette so a legacy CONDITION with no branches still shows
+ * its true/false/default.
+ */
+function outputHandlesFor(
+  nodeType: string,
+  config: Record<string, unknown>,
+  paletteHandles: string[],
+): string[] {
+  if (nodeType === 'CONDITION' || nodeType === 'PARALLEL_FORK') {
+    const branches = config.branches as Array<{ name?: string }> | undefined
+    const named = (branches || [])
+      .map((b) => (b?.name || '').trim())
+      .filter(Boolean)
+    if (named.length) return [...new Set(named)]
+  }
+  return paletteHandles
+}
+
 const TOOL_PROVIDER_COLORS: Record<string, string> = {
   TOOL: '#3b82f6',
   DATASOURCE: '#0ea5e9',
   REMOTE_AGENT: '#6366f1',
   FUNCTION: '#8b5cf6',
+  SEQUENTIAL_AGENT: '#0891b2',
+  PARALLEL_AGENT: '#0d9488',
+  LLM_AGENT: '#10b981',
 }
 
 const OrchestratorAgentNode = memo(({ data, id, selected }: NodeProps) => {
@@ -141,7 +198,6 @@ const OrchestratorAgentNode = memo(({ data, id, selected }: NodeProps) => {
 
   const title = (nodeData.metadata as { title?: string })?.title || palette.label
   const framework = 'ADK'
-  const executionMode = String(config.tool_execution_mode || 'sequential')
   const outputField = config.output_field ? String(config.output_field) : null
 
   const connectedTools = edges
@@ -188,16 +244,9 @@ const OrchestratorAgentNode = memo(({ data, id, selected }: NodeProps) => {
 
         {connectedTools.length > 0 ? (
           <div className="border border-gray-100 rounded-lg px-2 py-1.5 bg-gray-50">
-            <div className="flex items-center justify-between mb-1.5">
+            <div className="mb-1.5">
               <span className="text-[9px] font-semibold text-gray-400 uppercase tracking-wider">
                 Tools ({connectedTools.length})
-              </span>
-              <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-semibold ${
-                executionMode === 'parallel'
-                  ? 'bg-green-100 text-green-600'
-                  : 'bg-blue-100 text-blue-600'
-              }`}>
-                {executionMode === 'parallel' ? '⚡ parallel' : '↓ sequential'}
               </span>
             </div>
             {connectedTools.map((tool) => (
@@ -236,7 +285,7 @@ const OrchestratorAgentNode = memo(({ data, id, selected }: NodeProps) => {
 
       <Handle type="target" position={Position.Bottom} id="tools"
         style={{ background: '#fff', border: `2px solid ${palette.color}`, bottom: -8, width: 14, height: 14 }}
-        title="tools — connect TOOL / DATASOURCE / REMOTE_AGENT / FUNCTION here" />
+        title="tools — connect a tool, remote agent, function or tool group here" />
 
       {palette.output_handles.map((handle, i) => {
         const total = palette.output_handles.length
@@ -257,10 +306,11 @@ export default WorkflowNode
 export const buildNodeTypes = (): Record<string, React.ComponentType<NodeProps>> => {
   const types: Record<string, React.ComponentType<NodeProps>> = {}
   const generic = [
-    'HTTP_TRIGGER', 'SCHEDULE_TRIGGER', 'WEBHOOK_TRIGGER', 'QUEUE_TRIGGER',
-    'REMOTE_AGENT', 'FUNCTION', 'AGENT', 'MODEL', 'TOOL',
+    'A2A_START',
+    'SEQUENTIAL_AGENT', 'PARALLEL_AGENT',
+    'REMOTE_AGENT', 'FUNCTION', 'AGENT', 'LLM_AGENT', 'TOOL',
     'CONDITION', 'LOOP', 'TRANSFORM', 'END',
-    'DATASOURCE', 'HUMAN_APPROVAL', 'SUBWORKFLOW', 'PARALLEL_FORK', 'MERGE',
+    'DATASOURCE', 'HUMAN_APPROVAL', 'HUMAN_INPUT', 'SUBWORKFLOW', 'PARALLEL_FORK', 'MERGE',
   ]
   for (const t of generic) {
     types[t] = WorkflowNode

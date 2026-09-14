@@ -7,7 +7,7 @@ interface NodePaletteProps {
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
-  triggers: 'Triggers',
+  triggers: 'Entry',
   ai: 'AI / Agents',
   flow: 'Flow Control',
   data: 'Data',

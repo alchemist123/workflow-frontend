@@ -1,7 +1,7 @@
 import axios from 'axios'
 import type {
   Workflow, WorkflowVersion, CompileResponse, WorkflowExecution,
-  CanvasPayload, PaletteNode,
+  CanvasPayload, PaletteNode, RunMode,
 } from '../types/workflow'
 
 const api = axios.create({ baseURL: '/api/v1' })
@@ -21,8 +21,29 @@ export const workflowApi = {
   listVersions: (workflowId: string) =>
     api.get<WorkflowVersion[]>(`/workflows/${workflowId}/versions`).then(r => r.data),
 
-  execute: (workflowId: string, versionId: string, payload?: Record<string, unknown>) =>
-    api.post<WorkflowExecution>(`/workflows/${workflowId}/versions/${versionId}/execute`, payload).then(r => r.data),
+  /**
+   * Run a version by driving its generated package over A2A, so a test
+   * exercises the artefact that ships rather than a separate code path.
+   * Returns immediately; poll getExecution for the outcome.
+   */
+  test: (workflowId: string, versionId: string, payload: Record<string, unknown>, mode: RunMode) =>
+    api.post<WorkflowExecution>(
+      `/workflows/${workflowId}/versions/${versionId}/test`,
+      { payload, mode },
+    ).then(r => r.data),
+
+  /**
+   * Answer a run parked on a HUMAN_APPROVAL node.
+   *
+   * Resumes the parked task: the package keeps the A2A task and the ADK
+   * session on disk, so the workflow carries on from the approval node. The
+   * same execution row is updated.
+   */
+  answer: (workflowId: string, executionId: string, response: Record<string, unknown>) =>
+    api.post<WorkflowExecution>(
+      `/workflows/${workflowId}/executions/${executionId}/answer`,
+      { response },
+    ).then(r => r.data),
 
   listExecutions: (workflowId: string) =>
     api.get<WorkflowExecution[]>(`/workflows/${workflowId}/executions`).then(r => r.data),

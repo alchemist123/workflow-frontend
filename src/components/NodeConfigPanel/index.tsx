@@ -64,15 +64,12 @@ export default function NodeConfigPanel() {
         </section>
 
         {/* ── Per-node config forms ── */}
-        {nodeType === 'HTTP_TRIGGER'      && <HttpTriggerForm      cfg={cfg} save={save} />}
-        {nodeType === 'SCHEDULE_TRIGGER'  && <ScheduleTriggerForm  cfg={cfg} save={save} />}
-        {nodeType === 'WEBHOOK_TRIGGER'   && <WebhookTriggerForm   cfg={cfg} save={save} />}
-        {nodeType === 'QUEUE_TRIGGER'     && <QueueTriggerForm     cfg={cfg} save={save} />}
+        {nodeType === 'A2A_START'         && <A2aStartForm         cfg={cfg} save={save} />}
         {nodeType === 'TRANSFORM'            && <TransformForm           cfg={cfg} save={save} />}
         {nodeType === 'CONDITION'            && <ConditionForm           cfg={cfg} save={save} />}
         {nodeType === 'LOOP'                 && <LoopForm                cfg={cfg} save={save} />}
         {nodeType === 'END'                  && <EndForm                 cfg={cfg} save={save} />}
-        {nodeType === 'MODEL'                && <ModelForm               cfg={cfg} save={save} />}
+        {nodeType === 'LLM_AGENT'            && <LlmAgentForm            cfg={cfg} save={save} nodeId={selectedNode.id} />}
         {nodeType === 'ORCHESTRATOR_AGENT'   && <OrchestratorAgentForm   cfg={cfg} save={save} />}
         {nodeType === 'REMOTE_AGENT'         && <RemoteAgentForm         cfg={cfg} save={save} />}
         {nodeType === 'FUNCTION'             && <FunctionForm            cfg={cfg} save={save} />}
@@ -80,9 +77,12 @@ export default function NodeConfigPanel() {
         {nodeType === 'TOOL'                 && <McpForm label="Tool"        cfg={cfg} save={save} />}
         {nodeType === 'DATASOURCE'           && <McpForm label="Data Source" cfg={cfg} save={save} />}
         {nodeType === 'HUMAN_APPROVAL'    && <HumanApprovalForm    cfg={cfg} save={save} />}
+        {nodeType === 'HUMAN_INPUT'       && <HumanInputForm       cfg={cfg} save={save} />}
         {nodeType === 'SUBWORKFLOW'       && <SubworkflowForm      cfg={cfg} save={save} />}
         {nodeType === 'PARALLEL_FORK'     && <ParallelForkForm     cfg={cfg} save={save} />}
         {nodeType === 'MERGE'             && <MergeForm            cfg={cfg} save={save} />}
+        {nodeType === 'SEQUENTIAL_AGENT'  && <ToolGroupForm mode="sequential" nodeId={selectedNode.id} cfg={cfg} save={save} />}
+        {nodeType === 'PARALLEL_AGENT'    && <ToolGroupForm mode="parallel"   nodeId={selectedNode.id} cfg={cfg} save={save} />}
 
         {/* ── Schema reference ── */}
         {palette?.config_schema && (
@@ -184,84 +184,145 @@ function NumberInput({ value, onChange, min, max }: {
   )
 }
 
-/* ─── HTTP Trigger ─────────────────────────────────────────────────────────── */
+/* ─── Tool groups (Sequential / Parallel) ──────────────────────────────────── */
 
-type BodyField = { name: string; type: string; description: string; required: boolean }
-
-function HttpTriggerForm({ cfg, save }: FormProps) {
+function ToolGroupForm({
+  mode,
+  nodeId,
+  cfg,
+  save,
+}: FormProps & { mode: 'sequential' | 'parallel'; nodeId: string }) {
+  const { nodes, edges } = useWorkflowStore()
   const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
-  const fields: BodyField[] = ((cfg.body_schema as { fields?: BodyField[] })?.fields) || []
 
-  const saveFields = (f: BodyField[]) => s('body_schema', { fields: f })
-  const addField = () => saveFields([...fields, { name: '', type: 'string', description: '', required: false }])
-  const removeField = (i: number) => saveFields(fields.filter((_, j) => j !== i))
-  const setField = (i: number, k: keyof BodyField, v: string | boolean) =>
-    saveFields(fields.map((f, j) => j === i ? { ...f, [k]: v } : f))
+  // The tools wired into this group's own tools handle, in canvas order.
+  const children = edges
+    .filter((e) => e.target === nodeId && e.targetHandle === 'tools')
+    .map((e) => nodes.find((n) => n.id === e.source))
+    .filter((n): n is NonNullable<typeof n> => Boolean(n))
+
+  const label = (id: string) => {
+    const node = nodes.find((n) => n.id === id)
+    if (!node) return id
+    const title = (node.data?.metadata as { title?: string } | undefined)?.title
+    return title?.trim() || node.type || id
+  }
+
+  // The saved order, dropping anything no longer connected, then appending
+  // whatever is connected but unordered — matching how the compiler resolves it.
+  const saved = ((cfg.order as string[]) || []).filter((id) =>
+    children.some((c) => c.id === id),
+  )
+  const order = [...saved, ...children.map((c) => c.id).filter((id) => !saved.includes(id))]
+
+  const move = (index: number, delta: number) => {
+    const next = [...order]
+    const target = index + delta
+    if (target < 0 || target >= next.length) return
+    ;[next[index], next[target]] = [next[target], next[index]]
+    s('order', next)
+  }
 
   return (
     <section className="space-y-3">
-      <SectionLabel>HTTP Trigger</SectionLabel>
-      <Field label="Path">
-        <TextInput value={String(cfg.path || '/run')} onChange={(v) => s('path', v)} placeholder="/webhook" mono />
-      </Field>
-      <Field label="Method">
-        <Select
-          value={String(cfg.method || 'POST')}
-          onChange={(v) => s('method', v)}
-          options={['GET','POST','PUT','PATCH','DELETE'].map((m) => ({ value: m, label: m }))}
+      <SectionLabel>{mode === 'sequential' ? 'Sequential Tools' : 'Parallel Tools'}</SectionLabel>
+      <p className="text-[10px] text-gray-400 -mt-1.5">
+        {mode === 'sequential'
+          ? 'Connect tools below, then connect this node to an agent. The agent sees one tool that runs them in order, each one\u2019s output feeding the next.'
+          : 'Connect tools below, then connect this node to an agent. The agent sees one tool that runs them all at once on the same input.'}
+      </p>
+
+      <Field label="Tool name (what the model sees)">
+        <TextInput
+          value={String(cfg.name || '')}
+          onChange={(v) => s('name', v)}
+          placeholder={mode === 'sequential' ? 'fetch_then_summarise' : 'compare_sources'}
+          mono
         />
       </Field>
 
-      {/* Body schema */}
+      <Field label="Description (helps the model choose it)">
+        <TextArea
+          value={String(cfg.description || '')}
+          onChange={(v) => s('description', v)}
+          placeholder="Left blank, a description is generated listing the tools."
+          rows={2}
+        />
+      </Field>
+
+      {mode === 'parallel' && (
+        <Field label="Max at once (0 = no limit)">
+          <NumberInput
+            value={Number(cfg.max_concurrency ?? 0)}
+            onChange={(v) => s('max_concurrency', v)}
+            min={0}
+            max={50}
+          />
+        </Field>
+      )}
+
+      <label className="flex items-start gap-2 text-xs text-gray-600 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={Boolean(cfg.stop_on_error ?? (mode === 'sequential'))}
+          onChange={(e) => s('stop_on_error', e.target.checked)}
+          className="w-3 h-3 mt-0.5"
+        />
+        <span>
+          Stop on first error
+          <span className="block text-[10px] text-gray-400">
+            {mode === 'sequential'
+              ? 'Off: keep going and report which steps failed.'
+              : 'Off (default): one dead tool does not lose the others.'}
+          </span>
+        </span>
+      </label>
+
       <div>
-        <div className="flex items-center justify-between mb-1.5">
-          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Body Fields</p>
-          <button onClick={addField} className="text-indigo-500 hover:text-indigo-700 flex items-center gap-0.5 text-[10px]">
-            <Plus size={11} /> Add field
-          </button>
-        </div>
-        <p className="text-[10px] text-gray-400 mb-2">
-          Define the expected request body. The Run modal will generate a form from these.
+        <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+          {mode === 'sequential' ? 'Execution order' : 'Connected tools'}
         </p>
-        {fields.length === 0 && (
-          <p className="text-[10px] text-gray-300 italic">No fields — Run modal shows a raw JSON editor.</p>
+        {children.length === 0 && (
+          <p className="text-[10px] text-red-400">
+            Nothing connected. Wire a tool, remote agent, function or another
+            group into the dot at the bottom of this node.
+          </p>
         )}
-        {fields.map((f, i) => (
-          <div key={i} className="mb-2 p-2 bg-indigo-50 border border-indigo-100 rounded-md space-y-1.5">
-            {/* Row 1: name + type + required + remove */}
-            <div className="flex items-center gap-1">
-              <input
-                value={f.name}
-                onChange={(e) => setField(i, 'name', e.target.value)}
-                placeholder="field_name"
-                className="flex-1 text-[10px] font-mono px-1.5 py-1 border border-indigo-200 rounded focus:outline-none focus:ring-1 focus:ring-indigo-400 min-w-0"
-              />
-              <select
-                value={f.type}
-                onChange={(e) => setField(i, 'type', e.target.value)}
-                className="text-[10px] px-1 py-1 border border-indigo-200 rounded focus:outline-none bg-white"
-              >
-                <option value="string">string</option>
-                <option value="text">text</option>
-                <option value="number">number</option>
-                <option value="integer">integer</option>
-                <option value="boolean">boolean</option>
-              </select>
-              <label className="flex items-center gap-0.5 text-[10px] text-indigo-600 cursor-pointer flex-shrink-0">
-                <input type="checkbox" checked={f.required} onChange={(e) => setField(i, 'required', e.target.checked)} className="w-3 h-3" />
-                req
-              </label>
-              <button onClick={() => removeField(i)} className="text-red-300 hover:text-red-500 flex-shrink-0">
-                <Minus size={11} />
-              </button>
-            </div>
-            {/* Row 2: description hint */}
-            <input
-              value={f.description}
-              onChange={(e) => setField(i, 'description', e.target.value)}
-              placeholder="Description / hint shown to user"
-              className="w-full text-[10px] px-1.5 py-1 border border-indigo-100 rounded focus:outline-none bg-white text-gray-600"
-            />
+        {children.length === 1 && (
+          <p className="text-[10px] text-amber-500 mb-1">
+            Only one tool connected — this behaves the same as connecting it
+            straight to the agent.
+          </p>
+        )}
+        {order.map((id, i) => (
+          <div
+            key={id}
+            className="flex items-center gap-1 mb-1 p-1.5 bg-cyan-50 border border-cyan-100 rounded-md"
+          >
+            {mode === 'sequential' && (
+              <span className="text-[10px] font-mono text-cyan-600 w-4 flex-shrink-0">{i + 1}</span>
+            )}
+            <span className="flex-1 text-[11px] text-gray-700 truncate">{label(id)}</span>
+            {mode === 'sequential' && order.length > 1 && (
+              <>
+                <button
+                  onClick={() => move(i, -1)}
+                  disabled={i === 0}
+                  title="Move earlier"
+                  className="text-cyan-500 hover:text-cyan-700 disabled:opacity-25"
+                >
+                  <ChevronUp size={12} />
+                </button>
+                <button
+                  onClick={() => move(i, 1)}
+                  disabled={i === order.length - 1}
+                  title="Move later"
+                  className="text-cyan-500 hover:text-cyan-700 disabled:opacity-25"
+                >
+                  <ChevronDown size={12} />
+                </button>
+              </>
+            )}
           </div>
         ))}
       </div>
@@ -269,54 +330,108 @@ function HttpTriggerForm({ cfg, save }: FormProps) {
   )
 }
 
-/* ─── Schedule Trigger ─────────────────────────────────────────────────────── */
+/* ─── A2A Start ────────────────────────────────────────────────────────────── */
 
-function ScheduleTriggerForm({ cfg, save }: FormProps) {
+type PayloadField = { name: string; type: string; description: string; required: boolean }
+
+const PAYLOAD_FIELD_TYPES = ['string', 'text', 'number', 'integer', 'boolean', 'object', 'array']
+
+function A2aStartForm({ cfg, save }: FormProps) {
   const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
+  const fields: PayloadField[] = ((cfg.payload_schema as { fields?: PayloadField[] })?.fields) || []
+  const inputMode = String(cfg.input_mode || 'json')
+
+  const saveFields = (f: PayloadField[]) => s('payload_schema', { fields: f })
+  const addField = () => saveFields([...fields, { name: '', type: 'string', description: '', required: false }])
+  const removeField = (i: number) => saveFields(fields.filter((_, j) => j !== i))
+  const setField = (i: number, k: keyof PayloadField, v: string | boolean) =>
+    saveFields(fields.map((f, j) => j === i ? { ...f, [k]: v } : f))
+
+  const names = fields.map((f) => f.name.trim())
+  const duplicates = new Set(names.filter((n, i) => n && names.indexOf(n) !== i))
+
   return (
     <section className="space-y-3">
-      <SectionLabel>Schedule</SectionLabel>
-      <Field label="Cron expression">
-        <TextInput value={String(cfg.cron || '0 * * * *')} onChange={(v) => s('cron', v)} placeholder="0 * * * *" mono />
-        <p className="text-[10px] text-gray-400 mt-1">min hour day month weekday</p>
-      </Field>
-      <Field label="Timezone">
-        <TextInput value={String(cfg.timezone || 'UTC')} onChange={(v) => s('timezone', v)} placeholder="UTC" />
-      </Field>
-    </section>
-  )
-}
+      <SectionLabel>A2A Start</SectionLabel>
+      <p className="text-[10px] text-gray-400 -mt-1.5">
+        This workflow is invoked by an A2A message. There is no path or schedule to
+        configure — callers send a payload, and it becomes the workflow&apos;s input.
+      </p>
 
-/* ─── Webhook Trigger ──────────────────────────────────────────────────────── */
+      <Field label="Payload type">
+        <Select
+          value={inputMode}
+          onChange={(v) => s('input_mode', v)}
+          options={[
+            { value: 'json', label: 'JSON object' },
+            { value: 'text', label: 'Plain text' },
+          ]}
+        />
+        <p className="text-[10px] text-gray-400 mt-1">
+          {inputMode === 'text'
+            ? 'The message body arrives as { text: "..." }.'
+            : 'Callers send a JSON object matching the fields below.'}
+        </p>
+      </Field>
 
-function WebhookTriggerForm({ cfg, save }: FormProps) {
-  const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
-  return (
-    <section className="space-y-3">
-      <SectionLabel>Webhook</SectionLabel>
-      <Field label="Path">
-        <TextInput value={String(cfg.path || '/webhook')} onChange={(v) => s('path', v)} placeholder="/webhook" mono />
-      </Field>
-      <Field label="Secret (optional)">
-        <TextInput value={String(cfg.secret || '')} onChange={(v) => s('secret', v)} placeholder="hmac secret" />
-      </Field>
-    </section>
-  )
-}
-
-/* ─── Queue Trigger ────────────────────────────────────────────────────────── */
-
-function QueueTriggerForm({ cfg, save }: FormProps) {
-  const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
-  return (
-    <section className="space-y-3">
-      <SectionLabel>Queue Trigger</SectionLabel>
-      <Field label="Queue name">
-        <TextInput value={String(cfg.queue_name || '')} onChange={(v) => s('queue_name', v)} placeholder="my-queue" />
-      </Field>
-      <Field label="Batch size">
-        <NumberInput value={Number(cfg.batch_size || 1)} onChange={(v) => s('batch_size', v)} min={1} max={100} />
-      </Field>
+      {inputMode === 'json' && (
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Payload Fields</p>
+            <button onClick={addField} className="text-indigo-500 hover:text-indigo-700 flex items-center gap-0.5 text-[10px]">
+              <Plus size={11} /> Add field
+            </button>
+          </div>
+          <p className="text-[10px] text-gray-400 mb-2">
+            The input contract this agent advertises. The Run panel builds its form from these.
+          </p>
+          {fields.length === 0 && (
+            <p className="text-[10px] text-gray-300 italic">No fields — Run panel shows a raw JSON editor.</p>
+          )}
+          {fields.map((f, i) => (
+            <div key={i} className="mb-2 p-2 bg-indigo-50 border border-indigo-100 rounded-md space-y-1.5">
+              <div className="flex items-center gap-1">
+                <input
+                  value={f.name}
+                  onChange={(e) => setField(i, 'name', e.target.value)}
+                  placeholder="field_name"
+                  className={`flex-1 text-[10px] font-mono px-1.5 py-1 border rounded focus:outline-none focus:ring-1 min-w-0 ${
+                    !f.name.trim() || duplicates.has(f.name.trim())
+                      ? 'border-red-300 focus:ring-red-400 bg-red-50'
+                      : 'border-indigo-200 focus:ring-indigo-400'
+                  }`}
+                />
+                <select
+                  value={f.type}
+                  onChange={(e) => setField(i, 'type', e.target.value)}
+                  className="text-[10px] px-1 py-1 border border-indigo-200 rounded focus:outline-none bg-white"
+                >
+                  {PAYLOAD_FIELD_TYPES.map((ty) => <option key={ty} value={ty}>{ty}</option>)}
+                </select>
+                <label className="flex items-center gap-0.5 text-[10px] text-indigo-600 cursor-pointer flex-shrink-0">
+                  <input type="checkbox" checked={f.required} onChange={(e) => setField(i, 'required', e.target.checked)} className="w-3 h-3" />
+                  req
+                </label>
+                <button onClick={() => removeField(i)} className="text-red-300 hover:text-red-500 flex-shrink-0">
+                  <Minus size={11} />
+                </button>
+              </div>
+              <input
+                value={f.description}
+                onChange={(e) => setField(i, 'description', e.target.value)}
+                placeholder="Description — shown to callers and in the Run panel"
+                className="w-full text-[10px] px-1.5 py-1 border border-indigo-100 rounded focus:outline-none bg-white text-gray-600"
+              />
+              {duplicates.has(f.name.trim()) && (
+                <p className="text-[10px] text-red-500">Duplicate field name.</p>
+              )}
+              {!f.name.trim() && (
+                <p className="text-[10px] text-red-500">Field needs a name.</p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   )
 }
@@ -430,19 +545,89 @@ function ConditionForm({ cfg, save }: FormProps) {
 
 /* ─── Loop ─────────────────────────────────────────────────────────────────── */
 
+/**
+ * The keys here are the ones the LOOP node actually declares: `mode`,
+ * `items_path`, `exit_condition`, `max_iterations`.
+ *
+ * This form used to write `items_expression` and `item_variable`, which nothing
+ * read, and offered no way to set `items_path` at all — so every loop built in
+ * the UI reached the generated package with no list to walk and iterated zero
+ * times without complaining.
+ */
 function LoopForm({ cfg, save }: FormProps) {
   const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
+  const mode = String(cfg.mode || 'for_each')
+  const itemsPath = String(cfg.items_path || '')
+  const exitCondition = String(cfg.exit_condition || '')
+
   return (
     <section className="space-y-3">
       <SectionLabel>Loop</SectionLabel>
-      <Field label="Items (JMESPath or field name)">
-        <TextInput value={String(cfg.items_expression || 'items')} onChange={(v) => s('items_expression', v)} placeholder="data.items or items" mono />
+      <p className="text-[10px] text-orange-700 bg-orange-50 border border-orange-100 rounded-md px-2 py-1.5 leading-relaxed">
+        A loop is a cycle on the canvas: wire <strong>loop body</strong> to the
+        work you want repeated, bring that path back to this node, and wire
+        <strong> done</strong> to whatever comes after.
+      </p>
+
+      <Field label="Mode">
+        <Select
+          value={mode}
+          onChange={(v) => s('mode', v)}
+          options={[
+            { value: 'for_each', label: 'For each — walk a list' },
+            { value: 'while', label: 'While — repeat until a condition is true' },
+          ]}
+        />
       </Field>
-      <Field label="Item variable name">
-        <TextInput value={String(cfg.item_variable || 'item')} onChange={(v) => s('item_variable', v)} placeholder="item" mono />
-      </Field>
+
+      {mode === 'for_each' ? (
+        <Field label="Path to the list">
+          <TextInput
+            value={itemsPath}
+            onChange={(v) => s('items_path', v)}
+            placeholder="items  or  data.items"
+            mono
+          />
+          {!itemsPath.trim() ? (
+            <p className="text-[10px] text-red-500 mt-1">
+              Required — without it the loop has nothing to walk.
+            </p>
+          ) : (
+            <p className="text-[10px] text-gray-400 mt-1">
+              Read once when the loop starts, so the body cannot change what is
+              being walked. Each pass sets <code className="bg-gray-100 px-0.5 rounded">current_item</code> and{' '}
+              <code className="bg-gray-100 px-0.5 rounded">current_index</code>.
+            </p>
+          )}
+        </Field>
+      ) : (
+        <Field label="Exit condition">
+          <TextInput
+            value={exitCondition}
+            onChange={(v) => s('exit_condition', v)}
+            placeholder="i >= 5"
+            mono
+          />
+          {!exitCondition.trim() ? (
+            <p className="text-[10px] text-red-500 mt-1">
+              Required — without it the loop only stops at the cap below.
+            </p>
+          ) : (
+            <p className="text-[10px] text-gray-400 mt-1">
+              Checked before each pass; the loop leaves when it is true.{' '}
+              <code className="bg-gray-100 px-0.5 rounded">data</code> is the latest payload,{' '}
+              <code className="bg-gray-100 px-0.5 rounded">i</code> the iteration count.
+            </p>
+          )}
+        </Field>
+      )}
+
       <Field label="Max iterations">
         <NumberInput value={Number(cfg.max_iterations || 100)} onChange={(v) => s('max_iterations', v)} min={1} max={10000} />
+        <p className="text-[10px] text-gray-400 mt-1">
+          Hard stop — ADK has no step limit of its own. Reaching it sets{' '}
+          <code className="bg-gray-100 px-0.5 rounded">truncated</code> on the result.
+        </p>
       </Field>
     </section>
   )
@@ -493,26 +678,199 @@ function EndForm({ cfg, save }: FormProps) {
   )
 }
 
+/* ─── Agent input / output structure ───────────────────────────────────────── */
+
+/**
+ * ADK's two schema fields, authored as field lists.
+ *
+ * `input_structure` becomes the agent's `input_schema`, which ADK only consults
+ * when the agent is *called as a tool* by another agent — that is where the
+ * declared fields become the parameters the calling model can fill in.
+ * `output_structure` becomes `output_schema`, which constrains the reply
+ * wherever the agent runs.
+ */
+function StructureFields({
+  label, hint, fields, onChange,
+}: {
+  label: string
+  hint: string
+  fields: PayloadField[]
+  onChange: (f: PayloadField[]) => void
+}) {
+  const add = () => onChange([...fields, { name: '', type: 'string', description: '', required: false }])
+  const remove = (i: number) => onChange(fields.filter((_, j) => j !== i))
+  const set = (i: number, k: keyof PayloadField, v: string | boolean) =>
+    onChange(fields.map((f, j) => (j === i ? { ...f, [k]: v } : f)))
+
+  const names = fields.map((f) => f.name.trim())
+  const duplicates = new Set(names.filter((n, i) => n && names.indexOf(n) !== i))
+  const invalid = (n: string) => !!n && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(n)
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">{label}</p>
+        <button onClick={add} className="text-emerald-600 hover:text-emerald-800 flex items-center gap-0.5 text-[10px]">
+          <Plus size={11} /> Add field
+        </button>
+      </div>
+      <p className="text-[10px] text-gray-400 mb-2">{hint}</p>
+      {fields.length === 0 && (
+        <p className="text-[10px] text-gray-300 italic mb-1">Not set.</p>
+      )}
+      {fields.map((f, i) => (
+        <div key={i} className="mb-2 p-2 bg-emerald-50 border border-emerald-100 rounded-md space-y-1.5">
+          <div className="flex items-center gap-1">
+            <input
+              value={f.name}
+              onChange={(e) => set(i, 'name', e.target.value)}
+              placeholder="field_name"
+              className={`flex-1 text-[10px] font-mono px-1.5 py-1 border rounded focus:outline-none focus:ring-1 min-w-0 ${
+                !f.name.trim() || duplicates.has(f.name.trim()) || invalid(f.name.trim())
+                  ? 'border-red-300 focus:ring-red-400 bg-red-50'
+                  : 'border-emerald-200 focus:ring-emerald-400'
+              }`}
+            />
+            <select
+              value={f.type}
+              onChange={(e) => set(i, 'type', e.target.value)}
+              className="text-[10px] px-1 py-1 border border-emerald-200 rounded focus:outline-none bg-white"
+            >
+              {PAYLOAD_FIELD_TYPES.map((ty) => <option key={ty} value={ty}>{ty}</option>)}
+            </select>
+            <label className="flex items-center gap-0.5 text-[10px] text-emerald-700 cursor-pointer flex-shrink-0">
+              <input type="checkbox" checked={f.required} onChange={(e) => set(i, 'required', e.target.checked)} className="w-3 h-3" />
+              req
+            </label>
+            <button onClick={() => remove(i)} className="text-red-300 hover:text-red-500 flex-shrink-0">
+              <Minus size={11} />
+            </button>
+          </div>
+          <input
+            value={f.description}
+            onChange={(e) => set(i, 'description', e.target.value)}
+            placeholder="Description — the calling model reads this"
+            className="w-full text-[10px] px-1.5 py-1 border border-emerald-100 rounded focus:outline-none bg-white text-gray-600"
+          />
+          {duplicates.has(f.name.trim()) && <p className="text-[10px] text-red-500">Duplicate field name.</p>}
+          {invalid(f.name.trim()) && (
+            <p className="text-[10px] text-red-500">Use letters, digits and underscores; cannot start with a digit.</p>
+          )}
+          {!f.name.trim() && <p className="text-[10px] text-red-500">Field needs a name.</p>}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * Both structure editors plus the state key, shared by every agent form.
+ *
+ * `showInput` is false for AGENT and ORCHESTRATOR_AGENT: neither can be wired
+ * into a tools handle, and ADK only consults `input_schema` when an agent is
+ * called as a tool — so the setting could never do anything for them.
+ */
+function AgentIoFields({
+  cfg, save, usedAsTool, showInput = true,
+}: {
+  cfg: Record<string, unknown>
+  save: (c: Record<string, unknown>) => void
+  usedAsTool: boolean
+  showInput?: boolean
+}) {
+  const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
+  const inputFields = ((cfg.input_structure as { fields?: PayloadField[] })?.fields) || []
+  const outputFields = ((cfg.output_structure as { fields?: PayloadField[] })?.fields) || []
+
+  return (
+    <>
+      {showInput && (
+        <StructureFields
+          label="Input structure"
+          hint={
+            usedAsTool
+              ? 'The arguments the calling agent can pass. Without these it can only send one blob of text.'
+              : 'Only used when this agent is connected to another agent as a sub-agent. Running in the flow, its input comes from the previous node.'
+          }
+          fields={inputFields}
+          onChange={(f) => s('input_structure', { fields: f })}
+        />
+      )}
+      <StructureFields
+        label="Output structure"
+        hint="The shape the reply must take. The model is constrained to return exactly this JSON."
+        fields={outputFields}
+        onChange={(f) => s('output_structure', { fields: f })}
+      />
+      <Field label="Store reply in state as">
+        <TextInput value={String(cfg.output_key || '')} onChange={(v) => s('output_key', v || undefined)}
+          placeholder="headline_out  (optional)" mono />
+        <p className="text-[10px] text-gray-400 mt-1">
+          With an output structure set, the parsed object is stored under this key.
+        </p>
+      </Field>
+    </>
+  )
+}
+
 /* ─── Model ────────────────────────────────────────────────────────────────── */
 
+// Kept in step with app/nodes/tasks/llm_agent.py, which is the source of truth.
 const PROVIDER_MODELS: Record<string, string[]> = {
-  google: ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
-  vertex_ai: ['gemini-2.0-flash-001', 'gemini-2.0-flash-lite-001', 'gemini-2.5-flash-001', 'gemini-1.5-pro-001', 'gemini-1.5-flash-001'],
+  google: ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-pro', 'gemini-1.5-flash'],
+  vertex_ai: ['gemini-2.0-flash-001', 'gemini-2.0-flash-lite-001', 'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-pro-001', 'gemini-1.5-flash-001'],
+}
+
+/**
+ * Model options that always include whatever the node actually holds.
+ *
+ * The config is not restricted to this list — the backend accepts any model id,
+ * and a canvas may have been built against a newer one. Falling back to the
+ * first option would then display a model the node is not using, which reads as
+ * a settings change nobody made.
+ */
+function modelOptions(models: string[], current: string) {
+  const known = models.includes(current)
+  const values = known || !current ? models : [current, ...models]
+  return values.map((m) => ({
+    value: m,
+    label: known || m !== current ? m : `${m} (set on this node)`,
+  }))
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
   google: 'Google', vertex_ai: 'Vertex AI',
 }
 
-function ModelForm({ cfg, save }: FormProps) {
+function LlmAgentForm({ cfg, save, nodeId }: FormProps & { nodeId: string }) {
   const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
   const provider = String(cfg.provider || 'google')
   const models = PROVIDER_MODELS[provider] ?? PROVIDER_MODELS.google
   const currentModel = String(cfg.model || models[0])
 
+  // Whether this agent is wired into something else's tools handle. That is
+  // what decides whether its input structure has any effect.
+  const edges = useWorkflowStore((st) => st.edges)
+  const usedAsTool = edges.some((e) => e.source === nodeId && e.targetHandle === 'tools')
+
   return (
     <section className="space-y-3">
-      <SectionLabel>Model</SectionLabel>
+      <SectionLabel>LLM Agent</SectionLabel>
+      <p className="text-[10px] text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-md px-2 py-1.5 leading-relaxed">
+        {usedAsTool
+          ? 'Connected as a sub-agent. The agent that owns it calls it as a tool, using the input structure below as its arguments.'
+          : 'Running in the flow. Give it tools on the bottom handle, or connect its output to another agent or a tool group to use it as a sub-agent.'}
+      </p>
+
+      <Field label="Name (what a calling model sees)">
+        <TextInput value={String(cfg.name || '')} onChange={(v) => s('name', v || undefined)}
+          placeholder="summariser  (defaults to the node title)" mono />
+      </Field>
+
+      <Field label="Description (helps the caller choose it)">
+        <TextArea value={String(cfg.description || '')} onChange={(v) => s('description', v || undefined)}
+          placeholder="Summarises long text into key points." rows={2} />
+      </Field>
 
       {/* Provider */}
       <Field label="Provider">
@@ -537,9 +895,9 @@ function ModelForm({ cfg, save }: FormProps) {
       {/* Model */}
       <Field label="Model">
         <Select
-          value={models.includes(currentModel) ? currentModel : models[0]}
+          value={currentModel}
           onChange={(v) => s('model', v)}
-          options={models.map((m) => ({ value: m, label: m }))}
+          options={modelOptions(models, currentModel)}
         />
       </Field>
 
@@ -598,14 +956,7 @@ function ModelForm({ cfg, save }: FormProps) {
         <NumberInput value={Number(cfg.max_tokens || 1024)} onChange={(v) => s('max_tokens', v)} min={1} max={32768} />
       </Field>
 
-      {/* Response format */}
-      <Field label="Response format">
-        <Select
-          value={String(cfg.response_format || 'text')}
-          onChange={(v) => s('response_format', v)}
-          options={[{ value: 'text', label: 'Text' }, { value: 'json', label: 'JSON (parse response)' }]}
-        />
-      </Field>
+      <AgentIoFields cfg={cfg} save={save} usedAsTool={usedAsTool} />
     </section>
   )
 }
@@ -620,7 +971,6 @@ const ADK_MODELS = PROVIDER_MODELS.google
 function AgentForm({ cfg, save }: FormProps) {
   const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
   const currentModel = String(cfg.model || ADK_MODELS[0])
-  const displayModel = ADK_MODELS.includes(currentModel) ? currentModel : ADK_MODELS[0]
 
   const mcpServers: MCP[] = (cfg.mcp_servers as MCP[]) || []
   const a2aAgents: A2A[] = (cfg.a2a_agents as A2A[]) || []
@@ -635,8 +985,8 @@ function AgentForm({ cfg, save }: FormProps) {
       <SectionLabel>Agent (ADK)</SectionLabel>
 
       <Field label="Model">
-        <Select value={displayModel} onChange={(v) => s('model', v)}
-          options={ADK_MODELS.map((m) => ({ value: m, label: m }))} />
+        <Select value={currentModel} onChange={(v) => s('model', v)}
+          options={modelOptions(ADK_MODELS, currentModel)} />
       </Field>
 
       <Field label="System prompt">
@@ -707,6 +1057,7 @@ function AgentForm({ cfg, save }: FormProps) {
           </div>
         ))}
       </div>
+      <AgentIoFields cfg={cfg} save={save} usedAsTool={false} showInput={false} />
     </section>
   )
 }
@@ -718,7 +1069,6 @@ type InlineFunction = { name: string; description: string; parameters: string; c
 function OrchestratorAgentForm({ cfg, save }: FormProps) {
   const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
   const currentModel = String(cfg.model || ADK_MODELS[0])
-  const displayModel = ADK_MODELS.includes(currentModel) ? currentModel : ADK_MODELS[0]
 
   const fns: InlineFunction[] = ((cfg.functions as InlineFunction[]) || []).map((f) => ({
     name: f.name || '',
@@ -743,12 +1093,12 @@ function OrchestratorAgentForm({ cfg, save }: FormProps) {
       <SectionLabel>Orchestrator Agent</SectionLabel>
 
       <p className="text-[10px] text-indigo-600 bg-indigo-50 border border-indigo-100 rounded-md px-2 py-1.5 leading-relaxed">
-        Connect <strong>TOOL</strong>, <strong>DATASOURCE</strong>, <strong>REMOTE AGENT</strong>, or <strong>FUNCTION</strong> nodes to the <strong>bottom handle</strong> to give this agent access to them as tools.
+        Connect <strong>TOOL</strong>, <strong>DATASOURCE</strong>, <strong>REMOTE AGENT</strong>, or <strong>FUNCTION</strong> nodes to the <strong>bottom handle</strong> to give this agent access to them as tools. To make several of them run in a set order or all at once, wire them into a <strong>Sequential Tools</strong> or <strong>Parallel Tools</strong> node first.
       </p>
 
       <Field label="Model">
-        <Select value={displayModel} onChange={(v) => s('model', v)}
-          options={ADK_MODELS.map((m) => ({ value: m, label: m }))} />
+        <Select value={currentModel} onChange={(v) => s('model', v)}
+          options={modelOptions(ADK_MODELS, currentModel)} />
       </Field>
 
       <Field label="GCP Project ID (Vertex AI)">
@@ -785,32 +1135,6 @@ function OrchestratorAgentForm({ cfg, save }: FormProps) {
         <NumberInput value={Number(cfg.max_iterations || 10)} onChange={(v) => s('max_iterations', v)} min={1} max={50} />
       </Field>
 
-      {/* Tool execution mode */}
-      <Field label="Tool execution mode">
-        <div className="flex gap-1">
-          {(['sequential', 'parallel'] as const).map((mode) => (
-            <button
-              key={mode}
-              onClick={() => s('tool_execution_mode', mode)}
-              className={`flex-1 py-1 text-[10px] rounded-md border font-medium transition-colors ${
-                (cfg.tool_execution_mode || 'sequential') === mode
-                  ? mode === 'parallel'
-                    ? 'bg-green-500 border-green-500 text-white'
-                    : 'bg-blue-500 border-blue-500 text-white'
-                  : 'bg-white border-gray-200 text-gray-600 hover:border-gray-400'
-              }`}
-            >
-              {mode === 'parallel' ? '⚡ Parallel' : '↓ Sequential'}
-            </button>
-          ))}
-        </div>
-        <p className="text-[10px] text-gray-400 mt-1">
-          {(cfg.tool_execution_mode || 'sequential') === 'parallel'
-            ? 'All tool calls in a turn run concurrently — faster for independent tools.'
-            : 'Tool calls run one by one — safer for dependent or stateful tools.'}
-        </p>
-      </Field>
-
       {/* Output field */}
       <Field label="Output field → next node">
         <TextInput
@@ -845,6 +1169,7 @@ function OrchestratorAgentForm({ cfg, save }: FormProps) {
           </div>
         ))}
       </div>
+      <AgentIoFields cfg={cfg} save={save} usedAsTool={false} showInput={false} />
     </section>
   )
 }
@@ -957,20 +1282,112 @@ function McpForm({ label, cfg, save }: FormProps & { label: string }) {
 
 /* ─── Human Approval ───────────────────────────────────────────────────────── */
 
+/**
+ * The keys here are the ones the node declares: `prompt`, `assignees` and
+ * `collect_fields`.
+ *
+ * This form used to write `message`, `approvers` and `timeout_seconds`, none
+ * of which anything read — the same disconnect the LOOP panel had. The timeout
+ * is gone for good: the node parks the A2A task at `input-required` with
+ * nothing waiting on a clock, so an approval cannot expire inside the package.
+ */
 function HumanApprovalForm({ cfg, save }: FormProps) {
   const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
+  const prompt = String(cfg.prompt || '')
+  const assignees: string[] = Array.isArray(cfg.assignees) ? (cfg.assignees as string[]) : []
+  const collected: PayloadField[] = ((cfg.collect_fields as { fields?: PayloadField[] })?.fields) || []
+
   return (
     <section className="space-y-3">
       <SectionLabel>Human Approval</SectionLabel>
-      <Field label="Timeout (seconds)">
-        <NumberInput value={Number(cfg.timeout_seconds || 3600)} onChange={(v) => s('timeout_seconds', v)} min={60} />
+      <p className="text-[10px] text-purple-700 bg-purple-50 border border-purple-100 rounded-md px-2 py-1.5 leading-relaxed">
+        The run stops here and the A2A task reports <strong>input-required</strong> until
+        someone answers. Wire both <strong>approved</strong> and <strong>rejected</strong> onward.
+      </p>
+
+      <Field label="Question for the approver">
+        <TextArea value={prompt} onChange={(v) => s('prompt', v)}
+          placeholder="This expense is over the limit. Approve it?" rows={3} />
+        {!prompt.trim() && (
+          <p className="text-[10px] text-amber-600 mt-1">
+            Without this the task just says &ldquo;Approve this step?&rdquo;, which tells
+            the approver nothing about what they are approving.
+          </p>
+        )}
       </Field>
-      <Field label="Approvers (comma-separated emails)">
-        <TextInput value={String(cfg.approvers || '')} onChange={(v) => s('approvers', v)} placeholder="alice@example.com, bob@example.com" />
+
+      <Field label="Assign to (comma-separated)">
+        <TextInput
+          value={assignees.join(', ')}
+          onChange={(v) => s('assignees', v.split(',').map((x) => x.trim()).filter(Boolean))}
+          placeholder="finance@example.com"
+        />
+        <p className="text-[10px] text-gray-400 mt-1">
+          Passed to the caller on the paused task as routing information. The
+          packaged agent does not notify anyone itself.
+        </p>
       </Field>
-      <Field label="Message">
-        <TextArea value={String(cfg.message || '')} onChange={(v) => s('message', v)} placeholder="Please review this request" rows={3} />
+
+      <StructureFields
+        label="Also ask for"
+        hint={'Collected alongside the decision. Marking one required enforces it on approval only — a rejection never needs them.'}
+        fields={collected}
+        onChange={(f) => s('collect_fields', { fields: f })}
+      />
+    </section>
+  )
+}
+
+/* ─── Human Input ──────────────────────────────────────────────────────────── */
+
+/**
+ * The sibling of HumanApprovalForm. Same pause, different question: values the
+ * workflow needs rather than a decision, so there is no approve/reject and the
+ * collected fields are the whole point.
+ */
+function HumanInputForm({ cfg, save }: FormProps) {
+  const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
+  const prompt = String(cfg.prompt || '')
+  const assignees: string[] = Array.isArray(cfg.assignees) ? (cfg.assignees as string[]) : []
+  const collected: PayloadField[] = ((cfg.collect_fields as { fields?: PayloadField[] })?.fields) || []
+
+  return (
+    <section className="space-y-3">
+      <SectionLabel>Human Input</SectionLabel>
+      <p className="text-[10px] text-violet-700 bg-violet-50 border border-violet-100 rounded-md px-2 py-1.5 leading-relaxed">
+        The run stops here and the A2A task reports <strong>input-required</strong> until
+        someone supplies these values. They are merged into the payload and the run continues.
+      </p>
+
+      <Field label="What to ask for">
+        <TextArea value={prompt} onChange={(v) => s('prompt', v)}
+          placeholder="We need shipping details before this can ship." rows={3} />
+        {!prompt.trim() && (
+          <p className="text-[10px] text-amber-600 mt-1">
+            Without this the paused task will not say why the workflow needs these values.
+          </p>
+        )}
       </Field>
+
+      <Field label="Assign to (comma-separated)">
+        <TextInput
+          value={assignees.join(', ')}
+          onChange={(v) => s('assignees', v.split(',').map((x) => x.trim()).filter(Boolean))}
+          placeholder="ops@example.com"
+        />
+      </Field>
+
+      <StructureFields
+        label="Values to collect"
+        hint={'Required ones are enforced by the node: an incomplete answer asks again rather than failing the run.'}
+        fields={collected}
+        onChange={(f) => s('collect_fields', { fields: f })}
+      />
+      {collected.length === 0 && (
+        <p className="text-[10px] text-red-500">
+          Add at least one field — otherwise the run pauses to ask for nothing.
+        </p>
+      )}
     </section>
   )
 }

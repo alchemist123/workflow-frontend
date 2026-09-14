@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { addEdge, applyNodeChanges, applyEdgeChanges } from '@xyflow/react'
 import type { Node, Edge, Connection, NodeChange, EdgeChange } from '@xyflow/react'
-import type { Workflow, WorkflowVersion, CompileResponse, WorkflowExecution } from '../types/workflow'
+import type { Workflow, WorkflowVersion, CompileResponse, WorkflowExecution, RunMode } from '../types/workflow'
 import { workflowApi } from '../api/client'
 
 interface WorkflowState {
@@ -16,6 +16,8 @@ interface WorkflowState {
   lastCompile: CompileResponse | null
   compileWarnings: string[]
   executions: WorkflowExecution[]
+  // Sticky across runs: whoever tests in task mode usually keeps testing that way.
+  runMode: RunMode
 
   // Execution node status overlay
   nodeStatus: Record<string, string>  // nodeId -> 'success' | 'failed' | 'running' | ...
@@ -49,12 +51,14 @@ interface WorkflowState {
   clearCanvas: () => void
   setCurrentWorkflow: (wf: Workflow) => void
   saveAndCompile: () => Promise<CompileResponse | null>
-  executeWorkflow: (payload?: Record<string, unknown>) => Promise<WorkflowExecution | null>
+  testWorkflow: (payload: Record<string, unknown>, mode: RunMode) => Promise<WorkflowExecution | null>
+  answerExecution: (executionId: string, response: Record<string, unknown>) => Promise<WorkflowExecution | null>
   packageWorkflow: () => Promise<void>
   loadExecutions: () => Promise<void>
   loadNodeLogs: (workflowId: string, executionId: string) => Promise<void>
   clearNodeStatus: () => void
   setSidebarOpen: (open: boolean) => void
+  setRunMode: (mode: RunMode) => void
   clearPackageResult: () => void
   loadCanvas: (version: WorkflowVersion) => void
 }
@@ -70,6 +74,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   lastCompile: null,
   compileWarnings: [],
   executions: [],
+  runMode: 'message',
   nodeStatus: {},
   isSaving: false,
   isExecuting: false,
@@ -152,6 +157,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
 
+  setRunMode: (mode) => set({ runMode: mode }),
+
   saveAndCompile: async () => {
     const { currentWorkflow, nodes, edges } = get()
     if (!currentWorkflow) return null
@@ -194,18 +201,39 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     }
   },
 
-  executeWorkflow: async (payload) => {
+  testWorkflow: async (payload, mode) => {
     const { currentWorkflow, lastCompile } = get()
-    if (!currentWorkflow || !lastCompile?.version_id) return null
-    if (!lastCompile.is_valid) return null
+    if (!currentWorkflow || !lastCompile?.version_id || !lastCompile.is_valid) return null
 
-    set({ isExecuting: true })
+    set({ isExecuting: true, nodeStatus: {} })
     try {
-      const exec = await workflowApi.execute(currentWorkflow.id, lastCompile.version_id, payload)
+      const exec = await workflowApi.test(currentWorkflow.id, lastCompile.version_id, payload, mode)
       set((state) => ({ executions: [exec, ...state.executions], isExecuting: false }))
       return exec
-    } catch {
-      set({ isExecuting: false })
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+      set({
+        isExecuting: false,
+        compileErrors: detail ? [detail] : ['The test run could not be started.'],
+      })
+      return null
+    }
+  },
+
+  /** Approve or reject a run waiting on a HUMAN_APPROVAL node. */
+  answerExecution: async (executionId, response) => {
+    const { currentWorkflow } = get()
+    if (!currentWorkflow) return null
+    try {
+      const exec = await workflowApi.answer(currentWorkflow.id, executionId, response)
+      // Replace the row in place: one decision is one run, not two.
+      set((state) => ({
+        executions: state.executions.map((e) => (e.id === exec.id ? exec : e)),
+      }))
+      return exec
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+      set({ compileErrors: detail ? [detail] : ['The answer could not be submitted.'] })
       return null
     }
   },
@@ -290,11 +318,27 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       targetHandle: e.target_handle || 'input',
     }))
 
-    // Restore lastCompile from the loaded version so Package is enabled without re-compiling
+    // Restore lastCompile from the loaded version so Package is enabled without
+    // re-compiling. A version the backend migrated on read comes back with
+    // is_valid=false and the reason in validation_errors, which keeps Run and
+    // Package disabled until the user saves the migrated canvas.
     const restoredCompile = version.is_valid
-      ? { version_id: version.id, is_valid: true, errors: version.validation_errors || [], ir: version.ir_json || null }
+      ? {
+          version_id: version.id,
+          is_valid: true,
+          errors: (version.validation_errors as string[]) || [],
+          warnings: [],
+          ir: version.ir_json || null,
+        }
       : null
 
-    set({ nodes: rfNodes, edges: rfEdges, currentVersion: version, lastCompile: restoredCompile })
+    set({
+      nodes: rfNodes,
+      edges: rfEdges,
+      currentVersion: version,
+      lastCompile: restoredCompile,
+      compileErrors: version.is_valid ? [] : ((version.validation_errors as string[]) || []),
+      compileWarnings: [],
+    })
   },
 }))
