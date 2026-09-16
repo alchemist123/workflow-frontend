@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react'
-import { X, Trash2, ChevronDown, ChevronUp, Plus, Minus } from 'lucide-react'
+import { X, Trash2, ChevronDown, ChevronUp, Plus, Minus, PlugZap, Loader2 } from 'lucide-react'
 import { useWorkflowStore } from '../../store/workflowStore'
 import { PALETTE_BY_TYPE } from '../../nodes/index'
-import { workflowApi, type NodeInput } from '../../api/client'
+import { workflowApi, mcpApi, type NodeInput, type McpTool } from '../../api/client'
 
 export default function NodeConfigPanel() {
   const { nodes, selectedNodeId, setSelectedNode, updateNodeConfig, updateNodeMetadata, deleteNode } =
@@ -81,6 +81,7 @@ export default function NodeConfigPanel() {
         {nodeType === 'HUMAN_APPROVAL'    && <HumanApprovalForm    cfg={cfg} save={save} />}
         {nodeType === 'HUMAN_INPUT'       && <HumanInputForm       cfg={cfg} save={save} />}
         {nodeType === 'SUBWORKFLOW'       && <SubworkflowForm      cfg={cfg} save={save} />}
+        {nodeType === 'MCP_TOOL'          && <McpToolForm          cfg={cfg} save={save} nodeId={selectedNode.id} />}
         {nodeType === 'PARALLEL_FORK'     && <ParallelForkForm     cfg={cfg} save={save} nodeId={selectedNode.id} />}
         {nodeType === 'MERGE'             && <MergeForm            cfg={cfg} save={save} />}
         {nodeType === 'SEQUENTIAL_AGENT'  && <ToolGroupForm mode="sequential" nodeId={selectedNode.id} cfg={cfg} save={save} />}
@@ -469,12 +470,18 @@ const FIELD_TYPES = ['string', 'text', 'number', 'integer', 'boolean', 'object',
  * saved) in order to check the mapping at compile time. Asking it keeps the
  * picker and the check agreeing.
  */
-function FieldMapper({ nodeId, cfg, save }: FormProps & { nodeId: string }) {
+/**
+ * What this node can read, as the compiler works it out.
+ *
+ * Shared by both mappers — a TRANSFORM's output fields and an MCP_TOOL's
+ * arguments — because both ask the same question and must offer the same
+ * answer the compiler will accept.
+ */
+function useNodeInputs(nodeId: string) {
   const nodes = useWorkflowStore((st) => st.nodes)
   const edges = useWorkflowStore((st) => st.edges)
   const [inputs, setInputs] = useState<NodeInput[]>([])
   const [opaque, setOpaque] = useState(false)
-  const fields: OutputField[] = (cfg.output_fields as OutputField[]) || []
 
   // The canvas as the compiler will see it, so the picker offers exactly what
   // the compiler will accept.
@@ -501,6 +508,46 @@ function FieldMapper({ nodeId, cfg, save }: FormProps & { nodeId: string }) {
       .catch(() => { if (!cancelled) { setInputs([]); setOpaque(true) } })
     return () => { cancelled = true }
   }, [canvas, nodeId])
+
+  return { inputs, opaque }
+}
+
+/** The dropdown of readable sources, grouped by where the value comes from. */
+function SourceSelect({
+  value, inputs, onChange,
+}: { value: string; inputs: NodeInput[]; onChange: (v: string) => void }) {
+  const known = inputs.some((x) => x.path === value)
+  const unknown = !!value && !known
+  const payload = inputs.filter((x) => x.source === 'payload')
+  const variables = inputs.filter((x) => x.source === 'variable')
+
+  return (
+    <select
+      value={value || ''}
+      onChange={(e) => onChange(e.target.value)}
+      className={`w-full text-[10px] px-1.5 py-1 border rounded bg-white focus:outline-none ${
+        unknown ? 'border-amber-400' : 'border-slate-200'
+      }`}
+    >
+      <option value="">— pick a source —</option>
+      {payload.length > 0 && (
+        <optgroup label="From the previous nodes">
+          {payload.map((x) => <option key={x.path} value={x.path}>{x.label}</option>)}
+        </optgroup>
+      )}
+      {variables.length > 0 && (
+        <optgroup label="Saved variables">
+          {variables.map((x) => <option key={x.path} value={x.path}>{x.label}</option>)}
+        </optgroup>
+      )}
+      {unknown && <option value={value}>{value} (not found)</option>}
+    </select>
+  )
+}
+
+function FieldMapper({ nodeId, cfg, save }: FormProps & { nodeId: string }) {
+  const { inputs, opaque } = useNodeInputs(nodeId)
+  const fields: OutputField[] = (cfg.output_fields as OutputField[]) || []
 
   const setFields = (next: OutputField[]) => save({ ...cfg, output_fields: next })
   const add = () => setFields([...fields, { name: '', type: 'string', source: '' }])
@@ -569,30 +616,11 @@ function FieldMapper({ nodeId, cfg, save }: FormProps & { nodeId: string }) {
                 </button>
               </div>
 
-              <select
+              <SourceSelect
                 value={f.source || ''}
-                onChange={(e) => set(i, 'source', e.target.value)}
-                className={`w-full text-[10px] px-1.5 py-1 border rounded bg-white focus:outline-none ${
-                  unknownSource ? 'border-amber-400' : 'border-slate-200'
-                }`}
-              >
-                <option value="">— pick a source —</option>
-                {inputs.filter((x) => x.source === 'payload').length > 0 && (
-                  <optgroup label="From the previous nodes">
-                    {inputs.filter((x) => x.source === 'payload').map((x) => (
-                      <option key={x.path} value={x.path}>{x.label}</option>
-                    ))}
-                  </optgroup>
-                )}
-                {inputs.filter((x) => x.source === 'variable').length > 0 && (
-                  <optgroup label="Saved variables">
-                    {inputs.filter((x) => x.source === 'variable').map((x) => (
-                      <option key={x.path} value={x.path}>{x.label}</option>
-                    ))}
-                  </optgroup>
-                )}
-                {unknownSource && <option value={f.source}>{f.source} (not found)</option>}
-              </select>
+                inputs={inputs}
+                onChange={(v) => set(i, 'source', v)}
+              />
 
               <input
                 value={f.default === undefined || f.default === null ? '' : String(f.default)}
@@ -683,6 +711,267 @@ function TransformForm({ cfg, save, nodeId }: FormProps & { nodeId: string }) {
       <Field label="Output key (optional)">
         <TextInput value={String(cfg.output_key || '')} onChange={(v) => s('output_key', v || undefined)} placeholder="wrap result in this key" />
       </Field>
+    </section>
+  )
+}
+
+
+/* ─── MCP Tool Call ───────────────────────────────────────────────────────── */
+
+/**
+ * Call one tool on an MCP server, as a step in the flow.
+ *
+ * The whole point of Fetch tools is that nothing here has to be typed from
+ * memory: the server is asked what it has, the answer fills the picker, and
+ * picking a tool pre-fills one argument row per parameter it declares — with
+ * the right names, the right types and the required ones marked. The schema is
+ * kept on the node too, so the compiler can check the arguments at build time
+ * without making a network call of its own.
+ */
+function McpToolForm({ cfg, save, nodeId }: FormProps & { nodeId: string }) {
+  const { inputs } = useNodeInputs(nodeId)
+  const [tools, setTools] = useState<McpTool[]>([])
+  const [fetching, setFetching] = useState(false)
+  const [problem, setProblem] = useState<string | null>(null)
+  const [fetched, setFetched] = useState(false)
+
+  const url = String(cfg.mcp_url || '')
+  const token = String(cfg.auth_token || '')
+  const toolName = String(cfg.tool_name || '')
+  const argMode = String(cfg.arg_mode || 'fields')
+  const args: OutputField[] = (cfg.arg_fields as OutputField[]) || []
+  const schema = (cfg.tool_schema as { properties?: Record<string, unknown>; required?: string[] }) || {}
+  const declared = Object.keys(schema.properties || {})
+  const required = new Set(schema.required || [])
+
+  const s = (k: string, v: unknown) => save({ ...cfg, [k]: v })
+
+  const fetchTools = async () => {
+    setFetching(true)
+    setProblem(null)
+    try {
+      const { tools: found, error } = await mcpApi.listTools(url, token)
+      setTools(found)
+      setFetched(true)
+      setProblem(error)
+    } catch {
+      setProblem('The platform could not reach its own API. Is the backend running?')
+    } finally {
+      setFetching(false)
+    }
+  }
+
+  /** Picking a tool replaces the argument rows with that tool's parameters. */
+  const chooseTool = (name: string) => {
+    const tool = tools.find((t) => t.name === name)
+    if (!tool) {
+      s('tool_name', name)
+      return
+    }
+    save({
+      ...cfg,
+      tool_name: tool.name,
+      tool_description: tool.description,
+      tool_schema: tool.input_schema,
+      // Keep a source the user already picked for an argument of the same
+      // name: re-fetching a server should not throw away their mapping.
+      arg_fields: tool.arguments.map((a) => {
+        const existing = args.find((f) => (f.name || '').trim() === a.name)
+        return {
+          name: a.name,
+          type: a.type,
+          source: existing?.source || '',
+          ...(existing?.default !== undefined ? { default: existing.default } : {}),
+          ...(a.required ? { required: true } : {}),
+        }
+      }),
+    })
+  }
+
+  const setArgs = (next: OutputField[]) => s('arg_fields', next)
+  const setArg = (i: number, key: keyof OutputField, value: unknown) =>
+    setArgs(args.map((f, j) => (j === i ? { ...f, [key]: value } : f)))
+
+  const selected = tools.find((t) => t.name === toolName)
+  const unmapped = [...required].filter(
+    (r) => !args.some((f) => (f.name || '').trim() === r && (f.source || f.default !== undefined)),
+  )
+
+  return (
+    <section className="space-y-3">
+      <SectionLabel>MCP Server</SectionLabel>
+      <p className="text-[10px] text-gray-400">
+        Calls one tool directly, every time the flow reaches this node — no
+        agent and no model deciding. The tool&rsquo;s result is merged into the
+        payload for the next node.
+      </p>
+
+      <Field label="Server URL">
+        <TextInput
+          value={url}
+          onChange={(v) => s('mcp_url', v)}
+          placeholder="http://localhost:8000/mcp"
+          mono
+        />
+        <p className="text-[10px] text-gray-400 mt-1">
+          A base URL, a <code>/mcp</code> endpoint or a <code>/sse</code> one —
+          each is tried in turn.
+        </p>
+      </Field>
+
+      <Field label="Auth token (optional)">
+        <TextInput
+          value={token}
+          onChange={(v) => s('auth_token', v || undefined)}
+          placeholder="sent as Authorization: Bearer …"
+          mono
+        />
+      </Field>
+
+      <button
+        onClick={fetchTools}
+        disabled={!url.trim() || fetching}
+        className="w-full text-[10px] py-1.5 rounded-md flex items-center justify-center gap-1 border border-blue-300 text-blue-600 hover:bg-blue-50 disabled:opacity-40 disabled:hover:bg-transparent"
+      >
+        {fetching ? <Loader2 size={11} className="animate-spin" /> : <PlugZap size={11} />}
+        {fetching ? 'Asking the server…' : 'Fetch tools'}
+      </button>
+
+      {problem && <p className="text-[10px] text-red-500">{problem}</p>}
+      {fetched && !problem && (
+        <p className="text-[10px] text-green-600">
+          {tools.length} tool{tools.length === 1 ? '' : 's'} on this server.
+        </p>
+      )}
+
+      <Field label="Tool">
+        {tools.length > 0 ? (
+          <Select
+            value={toolName}
+            onChange={chooseTool}
+            options={[
+              { value: '', label: '— pick a tool —' },
+              ...tools.map((t) => ({
+                value: t.name,
+                label: t.description ? `${t.name} — ${t.description}` : t.name,
+              })),
+            ]}
+          />
+        ) : (
+          <>
+            <TextInput
+              value={toolName}
+              onChange={(v) => s('tool_name', v)}
+              placeholder="fetch the tools to pick one"
+              mono
+            />
+            {!!toolName && (
+              <p className="text-[10px] text-gray-400 mt-1">
+                Saved from an earlier fetch. Fetch again to re-check it still
+                exists and refresh its arguments.
+              </p>
+            )}
+          </>
+        )}
+        {selected?.description && (
+          <p className="text-[10px] text-gray-500 mt-1">{selected.description}</p>
+        )}
+      </Field>
+
+      {!!toolName && (
+        <>
+          <SectionLabel>Arguments</SectionLabel>
+          <Field label="Where the arguments come from">
+            <Select
+              value={argMode}
+              onChange={(v) => s('arg_mode', v)}
+              options={[
+                { value: 'fields', label: 'Map each one (recommended)' },
+                { value: 'passthrough', label: 'Send the whole payload' },
+              ]}
+            />
+          </Field>
+
+          {argMode === 'passthrough' ? (
+            <p className="text-[10px] text-amber-600">
+              The payload carries keys from every earlier node. A server that
+              validates its input strictly will reject the extra ones.
+            </p>
+          ) : (
+            <>
+              {args.length === 0 && (
+                <p className="text-[10px] text-gray-400">
+                  This tool takes no arguments.
+                </p>
+              )}
+              {unmapped.length > 0 && (
+                <p className="text-[10px] text-red-500">
+                  Required and not mapped: {unmapped.join(', ')}.
+                </p>
+              )}
+              {args.map((f, i) => {
+                const name = (f.name || '').trim()
+                const isRequired = required.has(name) || !!f.required
+                const unknownArg = declared.length > 0 && !declared.includes(name)
+                const missing = isRequired && !f.source && f.default === undefined
+                const described = selected?.arguments.find((a) => a.name === name)
+                return (
+                  <div key={i} className="p-2 bg-blue-50/50 border border-blue-100 rounded-md space-y-1.5">
+                    <div className="flex items-center gap-1">
+                      <span className="text-[10px] font-mono text-blue-800 flex-1 truncate">
+                        {name || '(unnamed)'}
+                        {isRequired && <span className="text-red-400"> *</span>}
+                      </span>
+                      <span className="text-[10px] text-gray-400">{f.type || 'string'}</span>
+                      <button
+                        onClick={() => setArgs(args.filter((_, j) => j !== i))}
+                        className="text-red-300 hover:text-red-500 flex-shrink-0"
+                        title="don't send this argument"
+                      >
+                        <Minus size={11} />
+                      </button>
+                    </div>
+                    {described?.description && (
+                      <p className="text-[10px] text-gray-400">{described.description}</p>
+                    )}
+                    <SourceSelect
+                      value={f.source || ''}
+                      inputs={inputs}
+                      onChange={(v) => setArg(i, 'source', v)}
+                    />
+                    <input
+                      value={f.default === undefined || f.default === null ? '' : String(f.default)}
+                      onChange={(e) => setArg(i, 'default', e.target.value || undefined)}
+                      placeholder={isRequired ? 'or a fixed value' : 'fixed value (optional)'}
+                      className="w-full text-[10px] px-1.5 py-1 border border-blue-100 rounded bg-white text-gray-600 focus:outline-none"
+                    />
+                    {missing && (
+                      <p className="text-[10px] text-red-500">
+                        Required — pick a source or give it a fixed value.
+                      </p>
+                    )}
+                    {unknownArg && (
+                      <p className="text-[10px] text-amber-600">
+                        The server does not declare this argument. Re-fetch if
+                        the tool has changed.
+                      </p>
+                    )}
+                  </div>
+                )
+              })}
+            </>
+          )}
+
+          <Field label="Put the result under a key (optional)">
+            <TextInput
+              value={String(cfg.result_key || '')}
+              onChange={(v) => s('result_key', v || undefined)}
+              placeholder="merged into the payload when empty"
+              mono
+            />
+          </Field>
+        </>
+      )}
     </section>
   )
 }

@@ -66,6 +66,96 @@ interface WorkflowState {
 let nodeCounter = 0
 
 /**
+ * Paint a run onto the canvas as it happens.
+ *
+ * The backend streams one frame per node over SSE while the run is still in
+ * flight (`GET .../executions/{id}/events`). This used to wait for the whole
+ * run and then read the node logs, so a thirty-second workflow was thirty
+ * seconds of nothing followed by every node turning green at once.
+ *
+ * Only one stream at a time: starting a second run closes the first, so a
+ * re-run cannot have the previous run still repainting nodes underneath it.
+ */
+let liveRun: EventSource | null = null
+
+type ProgressFrame = {
+  e: 'start' | 'end' | 'error' | 'finished'
+  node?: string
+  canvas_id?: string | null
+  iteration?: number
+  error?: string | null
+}
+
+function watchExecution(
+  workflowId: string,
+  executionId: string,
+  set: (partial: Partial<WorkflowState> | ((s: WorkflowState) => Partial<WorkflowState>)) => void,
+  get: () => WorkflowState,
+) {
+  liveRun?.close()
+  const source = new EventSource(
+    `/api/v1/workflows/${workflowId}/executions/${executionId}/events`,
+  )
+  liveRun = source
+
+  // A backstop, not the normal path: the run itself times out well inside
+  // this. It exists because EventSource retries a failed connection forever
+  // without reporting anything, and a spinner that never stops is worse than
+  // one that gives up and reads the run's record instead.
+  const giveUp = window.setTimeout(() => {
+    stop()
+    set({ isExecuting: false })
+    get().loadNodeLogs(workflowId, executionId)
+  }, 240_000)
+
+  const stop = () => {
+    window.clearTimeout(giveUp)
+    if (liveRun === source) liveRun = null
+    source.close()
+  }
+
+  source.onmessage = (message) => {
+    let frame: ProgressFrame
+    try {
+      frame = JSON.parse(message.data)
+    } catch {
+      return
+    }
+
+    if (frame.e === 'finished') {
+      stop()
+      set({ isExecuting: false })
+      // The run's own record is the authority on the outcome; the stream only
+      // says what happened while it was happening.
+      get().loadExecutions()
+      get().loadNodeLogs(workflowId, executionId)
+      return
+    }
+
+    // `start` comes from the node wrapper and `end` from the runner's event,
+    // so a node goes running -> success without the canvas guessing.
+    const status =
+      frame.e === 'start' ? 'running' : frame.e === 'error' || frame.error ? 'failed' : 'success'
+
+    // Only `end` frames carry a canvas id; a `start` frame knows the generated
+    // node name, which the run's node logs use too.
+    const key = frame.canvas_id || frame.node
+    if (!key) return
+    set((state) => ({ nodeStatus: { ...state.nodeStatus, [key]: status } }))
+  }
+
+  source.onerror = () => {
+    // EventSource retries on its own; give up only once the run is over, which
+    // the backend signals by ending the stream.
+    if (source.readyState === EventSource.CLOSED) {
+      stop()
+      set({ isExecuting: false })
+      get().loadNodeLogs(workflowId, executionId)
+    }
+  }
+}
+
+/**
  * Config a node needs before it can be wired at all.
  *
  * Almost every node type is usable straight out of the palette and is
@@ -253,7 +343,10 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     set({ isExecuting: true, nodeStatus: {} })
     try {
       const exec = await workflowApi.test(currentWorkflow.id, lastCompile.version_id, payload, mode)
-      set((state) => ({ executions: [exec, ...state.executions], isExecuting: false }))
+      // `/test` records the run and returns straight away — the run itself is
+      // a background task — so the canvas can watch it from here.
+      watchExecution(currentWorkflow.id, exec.id, set, get)
+      set((state) => ({ executions: [exec, ...state.executions] }))
       return exec
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
@@ -270,6 +363,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     const { currentWorkflow } = get()
     if (!currentWorkflow) return null
     try {
+      watchExecution(currentWorkflow.id, executionId, set, get)
       const exec = await workflowApi.answer(currentWorkflow.id, executionId, response)
       // Replace the row in place: one decision is one run, not two.
       set((state) => ({

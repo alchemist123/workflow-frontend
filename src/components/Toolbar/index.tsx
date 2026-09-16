@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Save, Play, Package, CheckCircle, XCircle,
-  Loader2, List, ArrowLeft, ChevronDown, X,
+  Loader2, List, ArrowLeft, ChevronDown, X, Search,
   Terminal, Copy, Check, RefreshCw, Clock, AlertCircle,
   ChevronRight, FolderOpen, UserCheck,
 } from 'lucide-react'
 import { useWorkflowStore } from '../../store/workflowStore'
 import type { RunMode, TestRunOutput, WorkflowExecution } from '../../types/workflow'
+import { workflowApi, type TaskLookup } from '../../api/client'
 
 interface ToolbarProps {
   onBack: () => void
@@ -289,9 +290,13 @@ export default function Toolbar({ onBack }: ToolbarProps) {
 
           {/* Panel body */}
           {selectedExec ? (
-            <ExecutionDetail exec={selectedExec} workflowId={currentWorkflow?.id || ''} />
+            <ExecutionDetail exec={selectedExec} workflowId={currentWorkflow?.id || ''} onCopy={copyText} />
           ) : (
             <div className="overflow-y-auto flex-1">
+              <TaskLookupBox
+                workflowId={currentWorkflow?.id || ''}
+                versionId={lastCompile?.version_id || ''}
+              />
               {executions.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-32 text-gray-400">
                   <List size={24} className="mb-2 opacity-40" />
@@ -316,6 +321,7 @@ export default function Toolbar({ onBack }: ToolbarProps) {
                           {ex.finished_at && ex.started_at &&
                             ` · ${((new Date(ex.finished_at).getTime() - new Date(ex.started_at).getTime()) / 1000).toFixed(1)}s`}
                         </p>
+                        <TaskIdLine exec={ex} onCopy={copyText} />
                       </div>
                       <ChevronRight size={12} className="text-gray-300 flex-shrink-0" />
                     </li>
@@ -347,6 +353,152 @@ export default function Toolbar({ onBack }: ToolbarProps) {
         />
       )}
     </>
+  )
+}
+
+
+
+/**
+ * Check an A2A task by id, without running anything.
+ *
+ * The id is the handle a caller keeps after submitting a workflow in task
+ * mode, and it outlives the run that created it — the package stores its tasks
+ * on disk. So this answers the question the Runs list cannot: "what happened
+ * to the task I submitted?", including one submitted from outside this UI
+ * entirely, as long as it shares the package's store.
+ *
+ * Read-only. A run parked on a human node shows as `input-required` here and
+ * stays parked; answering it is the Approve / Reject buttons on the run.
+ */
+function TaskLookupBox({ workflowId, versionId }: { workflowId: string; versionId: string }) {
+  const [open, setOpen] = useState(false)
+  const [taskId, setTaskId] = useState('')
+  const [checking, setChecking] = useState(false)
+  const [found, setFound] = useState<TaskLookup | null>(null)
+  const [problem, setProblem] = useState<string | null>(null)
+
+  const check = async () => {
+    const id = taskId.trim()
+    if (!id) return
+    setChecking(true)
+    setProblem(null)
+    setFound(null)
+    try {
+      setFound(await workflowApi.getTask(workflowId, versionId, id))
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+      setProblem(detail || 'The task could not be checked.')
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  if (!versionId) return null
+
+  return (
+    <div className="border-b border-gray-100 bg-gray-50/60">
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center gap-1.5 px-4 py-2 text-[11px] text-gray-500 hover:text-gray-700"
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <Search size={11} />
+        Check a task by id
+      </button>
+
+      {open && (
+        <div className="px-4 pb-3 space-y-2">
+          <p className="text-[10px] text-gray-400">
+            Any task this workflow&rsquo;s package has seen, including one
+            submitted from outside this UI. Nothing is run and nothing changes.
+          </p>
+          <div className="flex gap-1">
+            <input
+              value={taskId}
+              onChange={(e) => setTaskId(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') check() }}
+              placeholder="task id"
+              className="flex-1 min-w-0 font-mono text-[10px] px-2 py-1.5 border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
+            />
+            <button
+              onClick={check}
+              disabled={!taskId.trim() || checking}
+              className="px-2.5 py-1.5 text-[10px] rounded border border-blue-300 text-blue-600 hover:bg-blue-50 disabled:opacity-40 disabled:hover:bg-transparent flex items-center gap-1 flex-shrink-0"
+            >
+              {checking ? <Loader2 size={11} className="animate-spin" /> : <Search size={11} />}
+              Check
+            </button>
+          </div>
+
+          {problem && <p className="text-[10px] text-red-500">{problem}</p>}
+
+          {found && !found.found && (
+            <p className="text-[10px] text-amber-600">
+              No such task in this workflow&rsquo;s package. A task id from a
+              different workflow, or from before this version was last
+              packaged, will not be here.
+            </p>
+          )}
+
+          {found?.found && (
+            <div className="bg-white border border-gray-200 rounded-md p-2 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-gray-400">State</span>
+                <span className={`text-[11px] font-semibold ${a2aStateColor(found.state)}`}>
+                  {found.state}
+                </span>
+              </div>
+              {found.input_required && (
+                <p className="text-[10px] text-amber-600">
+                  Waiting on a person: &ldquo;{found.input_required.prompt}&rdquo;
+                  — open the run to answer it.
+                </p>
+              )}
+              {found.error && (
+                <p className="text-[10px] text-red-600 font-mono break-words">{found.error}</p>
+              )}
+              {found.result !== null && found.result !== undefined && (
+                <pre className="text-[10px] font-mono text-gray-600 bg-gray-50 rounded p-1.5 overflow-x-auto max-h-40">
+                  {JSON.stringify(found.result, null, 2)}
+                </pre>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The A2A task id, on a run in the list.
+ *
+ * It only exists for a run the platform drove over A2A, and it is the thing
+ * you paste into a `tasks/get` call — so it is worth showing without opening
+ * the run, and worth being one click to copy.
+ *
+ * Both invocation modes produce one: a blocking `message/send` creates a task
+ * too, it simply waits for it. The poll count is what distinguishes them, so
+ * it goes here rather than the mode name alone.
+ */
+function TaskIdLine({ exec, onCopy }: { exec: WorkflowExecution; onCopy: (t: string) => void }) {
+  const output = exec.output as unknown as TestRunOutput | null
+  const taskId = output?.a2a?.task_id
+  if (!taskId) return null
+
+  const polls = output?.a2a?.polls ?? 0
+  return (
+    <button
+      onClick={(e) => { e.stopPropagation(); onCopy(taskId) }}
+      title={`Copy task id — ${taskId}`}
+      className="mt-0.5 flex items-center gap-1 text-[10px] text-gray-400 hover:text-blue-600 group max-w-full"
+    >
+      <span className="font-mono truncate">task {taskId.slice(0, 8)}…</span>
+      {output?.a2a?.mode === 'task' && (
+        <span className="flex-shrink-0">· {polls} poll{polls === 1 ? '' : 's'}</span>
+      )}
+      <Copy size={9} className="flex-shrink-0 text-gray-300 group-hover:text-blue-500" />
+    </button>
   )
 }
 
@@ -500,7 +652,10 @@ function ApprovalPanel({ exec, pending }: {
   )
 }
 
-function ExecutionDetail({ exec, workflowId: _workflowId }: { exec: WorkflowExecution; workflowId: string }) {
+function ExecutionDetail(
+  { exec, workflowId: _workflowId, onCopy }:
+  { exec: WorkflowExecution; workflowId: string; onCopy: (t: string) => void },
+) {
   // A test run records an A2A envelope; older engine runs recorded a map of
   // node id -> output. The `a2a` key tells them apart.
   const output = exec.output as unknown as TestRunOutput | null
@@ -561,7 +716,14 @@ function ExecutionDetail({ exec, workflowId: _workflowId }: { exec: WorkflowExec
               } />
               {testRun.a2a.task_id && (
                 <DetailRow label="Task id" value={
-                  <span className="font-mono text-[10px] break-all">{testRun.a2a.task_id}</span>
+                  <button
+                    onClick={() => onCopy(testRun.a2a.task_id as string)}
+                    title="Copy — this is what tasks/get takes"
+                    className="font-mono text-[10px] break-all text-left hover:text-blue-600 flex items-start gap-1 group"
+                  >
+                    <span>{testRun.a2a.task_id}</span>
+                    <Copy size={10} className="mt-0.5 flex-shrink-0 text-gray-300 group-hover:text-blue-500" />
+                  </button>
                 } />
               )}
               {!!testRun.duration_ms && (

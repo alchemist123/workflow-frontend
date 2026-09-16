@@ -97,7 +97,9 @@ const WorkflowNode = memo(({ data, id, selected }: NodeProps) => {
   const labelHandles = nodeType === 'PARALLEL_FORK' || nodeType === 'CONDITION'
 
 
-  const borderColor = nodeStatus === 'success'
+  const borderColor = nodeStatus === 'running'
+    ? 'border-blue-400 shadow-blue-200 animate-pulse'
+    : nodeStatus === 'success'
     ? 'border-green-400 shadow-green-100'
     : nodeStatus === 'failed'
     ? 'border-red-400 shadow-red-100'
@@ -362,7 +364,7 @@ export const buildNodeTypes = (): Record<string, React.ComponentType<NodeProps>>
   const generic = [
     'A2A_START',
     'SEQUENTIAL_AGENT', 'PARALLEL_AGENT',
-    'REMOTE_AGENT', 'FUNCTION', 'AGENT', 'LLM_AGENT', 'TOOL',
+    'REMOTE_AGENT', 'FUNCTION', 'AGENT', 'LLM_AGENT', 'TOOL', 'MCP_TOOL',
     'CONDITION', 'LOOP', 'WAIT', 'TRANSFORM', 'END',
     'DATASOURCE', 'HUMAN_APPROVAL', 'HUMAN_INPUT', 'SUBWORKFLOW', 'PARALLEL_FORK', 'MERGE',
   ]

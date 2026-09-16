@@ -15,6 +15,17 @@ export interface NodeInput {
   label: string
 }
 
+/** What a `tasks/get` against the package came back with. */
+export interface TaskLookup {
+  found: boolean
+  state: string
+  task_id: string
+  result: unknown
+  error: string | null
+  input_required: { interrupt_id: string; prompt: string } | null
+  duration_ms: number
+}
+
 export const workflowApi = {
   list: () => api.get<Workflow[]>('/workflows').then(r => r.data),
   create: (name: string, description = '') =>
@@ -65,6 +76,18 @@ export const workflowApi = {
       '/workflows/node-inputs', { canvas, node_id: nodeId },
     ).then(r => r.data),
 
+  /**
+   * Look one A2A task up against a version's package.
+   *
+   * Read-only: a run parked on a human node stays parked. It answers at all
+   * because the package keeps its task store on disk, so a task outlives the
+   * process that created it.
+   */
+  getTask: (workflowId: string, versionId: string, taskId: string) =>
+    api.post<TaskLookup>(
+      `/workflows/${workflowId}/versions/${versionId}/task`, { task_id: taskId },
+    ).then(r => r.data),
+
   listExecutions: (workflowId: string) =>
     api.get<WorkflowExecution[]>(`/workflows/${workflowId}/executions`).then(r => r.data),
 
@@ -84,6 +107,27 @@ export const workflowApi = {
     }>(`/workflows/${workflowId}/versions/${versionId}/package`).then(r => r.data),
 
   getPalette: () => api.get<PaletteNode[]>('/workflows/palette').then(r => r.data),
+}
+
+/** One tool on an MCP server, as the server described it. */
+export interface McpTool {
+  name: string
+  description: string
+  input_schema: Record<string, unknown>
+  arguments: { name: string; type: string; required: boolean; description: string }[]
+}
+
+export const mcpApi = {
+  /**
+   * Ask an MCP server what tools it has.
+   *
+   * Answers 200 with an `error` string for a wrong URL or a refused token,
+   * because that is something the person editing the node needs to read.
+   */
+  listTools: (url: string, authToken: string) =>
+    api.post<{ tools: McpTool[]; error: string | null }>(
+      '/mcp/tools', { url, auth_token: authToken },
+    ).then(r => r.data),
 }
 
 export const resourceApi = {

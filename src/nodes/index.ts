@@ -128,6 +128,12 @@ export const STATIC_PALETTE: StaticPaletteNode[] = [
     wave: 2, is_trigger: false, is_terminal: false, output_handles: ['output', 'error'],
   },
   {
+    type: 'MCP_TOOL', label: 'MCP Tool Call', category: 'ai',
+    color: '#2563eb', icon: 'PlugZap',
+    description: 'Call one tool on an MCP server',
+    wave: 2, is_trigger: false, is_terminal: false, output_handles: ['output', 'error'],
+  },
+  {
     type: 'PARALLEL_FORK', label: 'Parallel Fork', category: 'flow',
     color: '#0d9488', icon: 'GitFork', description: 'Split into parallel branches',
     wave: 2, is_trigger: false, is_terminal: false, output_handles: [],
