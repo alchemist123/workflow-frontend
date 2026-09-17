@@ -1904,6 +1904,33 @@ function McpForm({ label, cfg, save }: FormProps & { label: string }) {
       <Field label="Args JMESPath (optional)">
         <TextInput value={String(cfg.args_jmespath || '')} onChange={(v) => s('args_jmespath', v || undefined)} placeholder="{query: query}" mono />
       </Field>
+
+      {/* A guard on a capability, not a step in the flow: the model picks the
+          moment, a person decides whether it may. */}
+      <label className="flex items-start gap-2 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={!!cfg.require_confirmation}
+          onChange={(e) => s('require_confirmation', e.target.checked || undefined)}
+          className="w-3.5 h-3.5 mt-0.5 flex-shrink-0"
+        />
+        <span className="text-[11px] text-gray-700 leading-snug">
+          Ask a human first
+          <span className="block text-[10px] text-gray-400">
+            The run stops the moment the agent tries to use this tool, naming
+            the call it wants to make, and the MCP request is not sent until
+            someone approves.
+          </span>
+        </span>
+      </label>
+
+      {!!cfg.require_confirmation && (
+        <p className="text-[10px] text-purple-700 bg-purple-50 border border-purple-100 rounded-md px-2 py-1.5 leading-relaxed">
+          The task parks at <strong>input-required</strong>, the same as a
+          Human Approval node — answered the same way. Rejecting tells the
+          model the call was refused; the server is never contacted.
+        </p>
+      )}
     </section>
   )
 }
