@@ -159,3 +159,81 @@ export const CATEGORY_COLORS: Record<string, string> = {
   ai: '#f59e0b',
   data: '#0ea5e9',
 }
+
+/* ─── The live palette ──────────────────────────────────────────────────────
+ *
+ * `STATIC_PALETTE` above is a hand-written copy of the backend registry, and
+ * it had already drifted: `AGENT` was missing from it entirely, so such a node
+ * rendered as an amber "Unknown node type" card. Worse, the drift is silent —
+ * nothing compares the two.
+ *
+ * So the backend's `/workflows/palette` is what the canvas actually draws
+ * from, and the static list is what it falls back to when the backend has not
+ * answered yet (first paint, or offline). Adding a node type is now a backend
+ * change only.
+ */
+
+import { useMemo } from 'react'
+import { useWorkflowStore } from '../store/workflowStore'
+import type { PaletteNode } from '../types/workflow'
+
+/** What the canvas needs to draw a node, from whichever source answered. */
+export interface PaletteEntry {
+  type: string
+  label: string
+  category: string
+  color: string
+  icon: string
+  description: string
+  wave: number
+  is_trigger: boolean
+  is_terminal: boolean
+  output_handles: string[]
+  tool_handles?: string[]
+  config_schema?: Record<string, unknown>
+}
+
+function fromStatic(n: StaticPaletteNode): PaletteEntry {
+  return { ...n }
+}
+
+function fromBackend(n: PaletteNode): PaletteEntry {
+  return {
+    type: n.type,
+    label: n.label,
+    category: n.category,
+    color: n.color,
+    icon: n.icon,
+    description: n.description,
+    wave: n.wave,
+    is_trigger: n.is_trigger,
+    is_terminal: n.is_terminal,
+    output_handles: n.output_handles,
+    // Derived by the backend from `accepts_tools`. It used to exist only in
+    // the static list, which is why the two could disagree about which nodes
+    // have a tools socket.
+    tool_handles: n.tool_handles ?? [],
+    config_schema: n.config_schema,
+  }
+}
+
+/** Every node type this build knows about, backend-first. */
+export function usePaletteList(): PaletteEntry[] {
+  const fetched = useWorkflowStore((s) => s.palette)
+  return useMemo(
+    () =>
+      fetched.length
+        ? fetched.map(fromBackend)
+        : STATIC_PALETTE.map(fromStatic),
+    [fetched],
+  )
+}
+
+/** The same, keyed by node type. */
+export function usePaletteMap(): Record<string, PaletteEntry> {
+  const list = usePaletteList()
+  return useMemo(
+    () => Object.fromEntries(list.map((n) => [n.type, n])),
+    [list],
+  )
+}

@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import * as Icons from 'lucide-react'
-import { STATIC_PALETTE, CATEGORY_COLORS, type StaticPaletteNode } from '../../nodes/index'
+import { CATEGORY_COLORS, usePaletteList, type PaletteEntry } from '../../nodes/index'
 
 interface NodePaletteProps {
   onDragStart: (e: React.DragEvent, nodeType: string) => void
@@ -18,7 +18,7 @@ function getIcon(iconName: string, size = 16): React.ReactNode {
   return LucideIcon ? <LucideIcon size={size} /> : null
 }
 
-function PaletteItem({ node, onDragStart }: { node: StaticPaletteNode; onDragStart: NodePaletteProps['onDragStart'] }) {
+function PaletteItem({ node, onDragStart }: { node: PaletteEntry; onDragStart: NodePaletteProps['onDragStart'] }) {
   return (
     <div
       draggable
@@ -42,15 +42,17 @@ function PaletteItem({ node, onDragStart }: { node: StaticPaletteNode; onDragSta
 export default function NodePalette({ onDragStart }: NodePaletteProps) {
   const [search, setSearch] = useState('')
   const [wave, setWave] = useState<1 | 2 | 'all'>('all')
+  // Whatever the backend registers, so a new node type needs no frontend edit.
+  const palette = usePaletteList()
 
-  const filtered = STATIC_PALETTE.filter((n) => {
+  const filtered = palette.filter((n) => {
     const matchesSearch = n.label.toLowerCase().includes(search.toLowerCase()) ||
       n.description.toLowerCase().includes(search.toLowerCase())
     const matchesWave = wave === 'all' || n.wave === wave
     return matchesSearch && matchesWave
   })
 
-  const grouped: Record<string, StaticPaletteNode[]> = {}
+  const grouped: Record<string, PaletteEntry[]> = {}
   for (const node of filtered) {
     grouped[node.category] = grouped[node.category] || []
     grouped[node.category].push(node)

@@ -1,7 +1,7 @@
-import React, { memo } from 'react'
+import React, { memo, useState } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
-import { CheckCircle, XCircle, Loader2 } from 'lucide-react'
-import { PALETTE_BY_TYPE } from './index'
+import { CheckCircle, XCircle, Loader2, Plus } from 'lucide-react'
+import { usePaletteMap } from './index'
 import { useWorkflowStore } from '../store/workflowStore'
 import * as Icons from 'lucide-react'
 
@@ -16,6 +16,158 @@ interface WorkflowNodeData {
 function getIcon(iconName: string, size = 18): React.ReactNode {
   const LucideIcon = (Icons as unknown as Record<string, React.ComponentType<{ size?: number; color?: string }>>)[iconName]
   return LucideIcon ? <LucideIcon size={size} color="white" /> : null
+}
+
+
+/**
+ * What the compiler has to say about this node, on the node itself.
+ *
+ * Compile results used to be a flat list of prose in a Toolbar dropdown,
+ * naming node ids nobody has ever seen on screen — so there was no way to tell
+ * which box was wrong. Each finding now carries the node it concerns, and this
+ * is where that lands.
+ *
+ * The heading is the node's own title; the sentence has had its `Node '<id>'`
+ * opening removed by the backend for exactly this.
+ */
+function NodeFindings({ nodeId, title }: { nodeId: string; title: string }) {
+  const findings = useWorkflowStore((s) => s.findings)
+  const mine = findings.filter(
+    (f) => f.node_id === nodeId || f.related_node_ids.includes(nodeId),
+  )
+  if (!mine.length) return null
+
+  const errors = mine.filter((f) => f.severity === 'error')
+  const worst = errors.length ? 'error' : 'warning'
+
+  return (
+    <div className="absolute -bottom-1.5 -left-1.5 z-10 group/findings">
+      <div
+        className={`rounded-full w-4 h-4 flex items-center justify-center shadow-sm border border-white cursor-help ${
+          worst === 'error' ? 'bg-red-500' : 'bg-amber-400'
+        }`}
+      >
+        <span className="text-white text-[9px] font-bold leading-none">
+          {mine.length}
+        </span>
+      </div>
+      <div className="hidden group-hover/findings:block absolute left-0 top-5 w-64 z-30">
+        <div
+          className={`rounded-lg shadow-lg border px-2.5 py-2 space-y-1.5 ${
+            worst === 'error'
+              ? 'bg-red-50 border-red-200'
+              : 'bg-amber-50 border-amber-200'
+          }`}
+        >
+          <p className="text-[10px] font-semibold text-gray-700">{title}</p>
+          {mine.map((finding, i) => (
+            <p
+              key={i}
+              className={`text-[10px] leading-snug ${
+                finding.severity === 'error' ? 'text-red-700' : 'text-amber-700'
+              }`}
+            >
+              {finding.message}
+            </p>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+/**
+ * A node's name, renameable where you are looking at it.
+ *
+ * Renaming was only possible in the config panel, which means selecting the
+ * node, finding the "Label & Description" field, and knowing it was there.
+ * Double-clicking the thing you want to rename is what people already try.
+ *
+ * The title is load-bearing beyond decoration: validation messages, the hint
+ * panel and the run log all name a node by it, so "Transform" three times over
+ * is genuinely hard to read.
+ */
+function NodeTitle({ id, title }: { id: string; title: string }) {
+  const updateNodeMetadata = useWorkflowStore((s) => s.updateNodeMetadata)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(title)
+
+  const commit = () => {
+    const next = draft.trim()
+    if (next && next !== title) updateNodeMetadata(id, { title: next })
+    setEditing(false)
+  }
+
+  if (!editing) {
+    return (
+      <span
+        // `nodrag` keeps ReactFlow from starting a drag on the double-click.
+        className="nodrag text-white text-xs font-semibold truncate flex-1 cursor-text"
+        title="Double-click to rename"
+        onDoubleClick={(e) => {
+          e.stopPropagation()
+          setDraft(title)
+          setEditing(true)
+        }}
+      >
+        {title}
+      </span>
+    )
+  }
+
+  return (
+    <input
+      autoFocus
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        e.stopPropagation()          // or Backspace would delete the node
+        if (e.key === 'Enter') commit()
+        if (e.key === 'Escape') setEditing(false)
+      }}
+      onDoubleClick={(e) => e.stopPropagation()}
+      className="nodrag flex-1 min-w-0 bg-white/95 text-gray-800 text-xs font-semibold px-1 py-0.5 rounded focus:outline-none focus:ring-2 focus:ring-white/70"
+    />
+  )
+}
+
+
+/**
+ * The socket a tool hangs off, drawn the same way wherever it appears.
+ *
+ * It used to be written twice — once from `palette.tool_handles` in the generic
+ * node and once hardcoded in the orchestrator's — with different sizes and
+ * different offsets, so the same socket looked and behaved differently
+ * depending on which node you were looking at. `tool_handles` now comes from
+ * the backend, which is what lets both use this.
+ */
+function ToolHandles({ handles, color }: { handles: string[]; color: string }) {
+  return (
+    <>
+      {handles.map((handle, i) => {
+        const leftPct = handles.length === 1 ? 50 : 20 + (60 / (handles.length - 1)) * i
+        return (
+          <Handle
+            key={`tool_${handle}`}
+            type="target"
+            position={Position.Bottom}
+            id={handle}
+            style={{
+              background: '#ffffff',
+              border: `2px solid ${color}`,
+              left: `${leftPct}%`,
+              bottom: -7,
+              width: 12,
+              height: 12,
+            }}
+            title={`${handle} — connect a tool, remote agent, function or tool group here`}
+          />
+        )
+      })}
+    </>
+  )
 }
 
 
@@ -49,8 +201,9 @@ function NodeStatusBadge({ status }: { status: string }) {
 const WorkflowNode = memo(({ data, id, selected }: NodeProps) => {
   const nodeData = data as WorkflowNodeData
   const nodeType = nodeData.type as string
-  const palette = PALETTE_BY_TYPE[nodeType]
+  const palette = usePaletteMap()[nodeType]
   const nodeStatus = useWorkflowStore((s) => s.nodeStatus[id])
+  const askWhatGoesHere = useWorkflowStore((s) => s.askWhatGoesHere)
   // Only a fork needs this, and it is selected as a joined string so the
   // comparison stays a primitive — subscribing every node to the edge array
   // would re-render the whole canvas on every edge change.
@@ -97,6 +250,16 @@ const WorkflowNode = memo(({ data, id, selected }: NodeProps) => {
   const labelHandles = nodeType === 'PARALLEL_FORK' || nodeType === 'CONDITION'
 
 
+  // Set by the canvas only while an edge is being dragged: true on the nodes
+  // that could accept it. Showing the answer during the gesture is what stops
+  // someone from having to learn the rules before they can draw anything.
+  const dropTarget = (nodeData as { _dropTarget?: boolean })._dropTarget
+  const dragState = dropTarget === undefined
+    ? ''
+    : dropTarget
+    ? 'ring-2 ring-teal-400 ring-offset-1'
+    : 'opacity-30'
+
   const borderColor = nodeStatus === 'running'
     ? 'border-blue-400 shadow-blue-200 animate-pulse'
     : nodeStatus === 'success'
@@ -109,14 +272,15 @@ const WorkflowNode = memo(({ data, id, selected }: NodeProps) => {
 
   return (
     <div
-      className={`rounded-xl shadow-lg border-2 transition-all relative ${borderColor} ${labelHandles ? 'min-w-[230px]' : 'min-w-[180px]'}`}
+      className={`group/node rounded-xl shadow-lg border-2 transition-all relative ${borderColor} ${dragState} ${labelHandles ? 'min-w-[230px]' : 'min-w-[180px]'}`}
       style={{ background: '#fff' }}
     >
       {nodeStatus && <NodeStatusBadge status={nodeStatus} />}
+      <NodeFindings nodeId={id} title={title} />
 
       <div className="flex items-center gap-2 px-3 py-2 rounded-t-xl" style={{ background: palette.color }}>
         <span className="flex-shrink-0">{getIcon(palette.icon)}</span>
-        <span className="text-white text-xs font-semibold truncate flex-1">{title}</span>
+        <NodeTitle id={id} title={title} />
         <span className="text-white/60 text-[10px] uppercase tracking-wider flex-shrink-0">{palette.category}</span>
       </div>
 
@@ -142,15 +306,7 @@ const WorkflowNode = memo(({ data, id, selected }: NodeProps) => {
           style={{ background: palette.color, border: '2px solid white' }} />
       )}
 
-      {palette.tool_handles?.map((handle, i) => {
-        const total = palette.tool_handles!.length
-        const leftPct = total === 1 ? 50 : 20 + (60 / (total - 1)) * i
-        return (
-          <Handle key={`tool_${handle}`} type="target" position={Position.Bottom} id={handle}
-            style={{ background: '#ffffff', border: `2px solid ${palette.color}`, left: `${leftPct}%`, bottom: -6 }}
-            title={`${handle} (connect tools here)`} />
-        )
-      })}
+      <ToolHandles handles={palette.tool_handles || []} color={palette.color} />
 
       {!palette.is_terminal && outputHandles.map((handle, i) => {
         const total = outputHandles.length
@@ -168,6 +324,19 @@ const WorkflowNode = memo(({ data, id, selected }: NodeProps) => {
                 top: `${topPct}%`,
               }}
               title={spare ? `${handle} — drag to add a branch` : handle} />
+            {/* Drag-to-empty-canvas opens the same menu, but nobody discovers
+                a gesture. This is the visible way in. */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                askWhatGoesHere(id, handle, e.clientX, e.clientY)
+              }}
+              title={`What can follow ${handle}?`}
+              className="absolute w-3.5 h-3.5 rounded-full bg-white border border-gray-300 text-gray-400 hover:border-blue-400 hover:text-blue-500 flex items-center justify-center opacity-0 group-hover/node:opacity-100 transition-opacity"
+              style={{ right: -26, top: `${topPct}%`, transform: 'translateY(-50%)' }}
+            >
+              <Plus size={9} />
+            </button>
             {labelHandles && (
               <span
                 className="absolute text-[9px] font-mono pointer-events-none truncate max-w-[90px]"
@@ -249,7 +418,7 @@ const OrchestratorAgentNode = memo(({ data, id, selected }: NodeProps) => {
   const { nodes, edges } = useWorkflowStore((s) => ({ nodes: s.nodes, edges: s.edges }))
   const nodeStatus = useWorkflowStore((s) => s.nodeStatus[id])
   const nodeData = data as WorkflowNodeData
-  const palette = PALETTE_BY_TYPE['ORCHESTRATOR_AGENT']!
+  const palette = usePaletteMap()['ORCHESTRATOR_AGENT']!
   const config = (nodeData.config || {}) as Record<string, unknown>
 
   const title = (nodeData.metadata as { title?: string })?.title || palette.label
@@ -285,7 +454,7 @@ const OrchestratorAgentNode = memo(({ data, id, selected }: NodeProps) => {
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-2 rounded-t-xl" style={{ background: palette.color }}>
         <span className="flex-shrink-0">{getIcon(palette.icon)}</span>
-        <span className="text-white text-xs font-semibold truncate flex-1">{title}</span>
+        <NodeTitle id={id} title={title} />
         <span className="text-white/70 text-[10px] font-mono flex-shrink-0">{framework}</span>
       </div>
 
@@ -339,9 +508,7 @@ const OrchestratorAgentNode = memo(({ data, id, selected }: NodeProps) => {
       <Handle type="target" position={Position.Left} id="input"
         style={{ background: palette.color, border: '2px solid white' }} />
 
-      <Handle type="target" position={Position.Bottom} id="tools"
-        style={{ background: '#fff', border: `2px solid ${palette.color}`, bottom: -8, width: 14, height: 14 }}
-        title="tools — connect a tool, remote agent, function or tool group here" />
+      <ToolHandles handles={palette.tool_handles || []} color={palette.color} />
 
       {palette.output_handles.map((handle, i) => {
         const total = palette.output_handles.length
@@ -359,18 +526,22 @@ OrchestratorAgentNode.displayName = 'OrchestratorAgentNode'
 
 export default WorkflowNode
 
-export const buildNodeTypes = (): Record<string, React.ComponentType<NodeProps>> => {
+/**
+ * The ReactFlow component for each node type.
+ *
+ * Driven by the type list rather than a literal: this used to be twenty
+ * hardcoded strings, so a type the backend registered but nobody remembered to
+ * add here rendered as the amber "Unknown node type" card. Pass the live
+ * palette's types and that cannot happen.
+ */
+export const buildNodeTypes = (
+  nodeTypes: string[] = [],
+): Record<string, React.ComponentType<NodeProps>> => {
   const types: Record<string, React.ComponentType<NodeProps>> = {}
-  const generic = [
-    'A2A_START',
-    'SEQUENTIAL_AGENT', 'PARALLEL_AGENT',
-    'REMOTE_AGENT', 'FUNCTION', 'AGENT', 'LLM_AGENT', 'TOOL', 'MCP_TOOL',
-    'CONDITION', 'LOOP', 'WAIT', 'TRANSFORM', 'END',
-    'DATASOURCE', 'HUMAN_APPROVAL', 'HUMAN_INPUT', 'SUBWORKFLOW', 'PARALLEL_FORK', 'MERGE',
-  ]
-  for (const t of generic) {
+  for (const t of nodeTypes) {
     types[t] = WorkflowNode
   }
+  // One type has a component of its own: it shows the tools wired into it.
   types['ORCHESTRATOR_AGENT'] = OrchestratorAgentNode
   return types
 }

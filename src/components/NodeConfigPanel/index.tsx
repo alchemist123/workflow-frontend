@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import { X, Trash2, ChevronDown, ChevronUp, Plus, Minus, PlugZap, Loader2 } from 'lucide-react'
 import { useWorkflowStore } from '../../store/workflowStore'
-import { PALETTE_BY_TYPE } from '../../nodes/index'
+import { usePaletteMap } from '../../nodes/index'
 import { workflowApi, mcpApi, type NodeInput, type McpTool } from '../../api/client'
 
 export default function NodeConfigPanel() {
@@ -12,16 +12,25 @@ export default function NodeConfigPanel() {
   const [description, setDescription] = useState('')
   const [schemaOpen, setSchemaOpen] = useState(false)
 
+  const storedTitle = (selectedNode?.data.metadata as { title?: string })?.title || ''
+  const storedDescription =
+    (selectedNode?.data.metadata as { description?: string })?.description || ''
+
+  // Follows the store, not just the selection. A node can now also be renamed
+  // on the canvas by double-clicking it, and this field used to be seeded once
+  // per selection — so a canvas rename left a stale value here, and blurring
+  // the field wrote the old name straight back over it.
+  //
+  // Safe against typing: the store only changes on blur, so re-running this
+  // cannot clobber a half-typed value.
   useEffect(() => {
-    if (selectedNode) {
-      setTitle((selectedNode.data.metadata as { title?: string })?.title || '')
-      setDescription((selectedNode.data.metadata as { description?: string })?.description || '')
-    }
-  }, [selectedNodeId])
+    setTitle(storedTitle)
+    setDescription(storedDescription)
+  }, [selectedNodeId, storedTitle, storedDescription])
 
   if (!selectedNode) return null
 
-  const palette = PALETTE_BY_TYPE[selectedNode.type!]
+  const palette = usePaletteMap()[selectedNode.type!]
   const nodeType = selectedNode.type!
   const cfg = (selectedNode.data.config || {}) as Record<string, unknown>
   const save = (c: Record<string, unknown>) => updateNodeConfig(selectedNode.id, c)

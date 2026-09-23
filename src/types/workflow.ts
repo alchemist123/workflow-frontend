@@ -58,9 +58,19 @@ export interface PaletteNode {
   is_trigger: boolean
   is_terminal: boolean
   output_handles: string[]
+  /** Derived from `accepts_tools`; `['tools']` or empty. */
+  tool_handles: string[]
   config_schema: Record<string, unknown>
   input_schema: Record<string, unknown>
   output_schema: Record<string, unknown>
+  // Flags the canvas uses to judge a connection as it is drawn.
+  allows_inbound: boolean
+  allows_outbound: boolean
+  accepts_tools: boolean
+  provides_tool: boolean
+  is_tool_group: boolean
+  is_agent: boolean
+  uses_named_routes: boolean
 }
 
 export interface Workflow {

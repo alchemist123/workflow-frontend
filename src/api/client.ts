@@ -106,7 +106,78 @@ export const workflowApi = {
       files: string[]
     }>(`/workflows/${workflowId}/versions/${versionId}/package`).then(r => r.data),
 
+  /**
+   * Check a canvas without saving it.
+   *
+   * `saveCanvas` writes a new version row every time, so it cannot be used for
+   * live feedback. A full pass is about half a millisecond.
+   */
+  validate: (canvas: unknown) =>
+    api.post<{ findings: Finding[]; is_valid: boolean }>(
+      '/workflows/validate', { canvas },
+    ).then(r => r.data),
+
   getPalette: () => api.get<PaletteNode[]>('/workflows/palette').then(r => r.data),
+
+  /**
+   * Which socket may be wired to which, and why not when it may not.
+   *
+   * Fetched rather than reimplemented here: the backend proves this set is
+   * exactly what the compiler enforces, and a copy in the browser would be the
+   * one version of the rules nothing tests.
+   */
+  getConnectionRules: () =>
+    api.get<ConnectionRules>('/workflows/connection-rules').then(r => r.data),
+}
+
+/**
+ * One validation result, and the thing on the canvas it is about.
+ *
+ * `text` is the message as the compile log shows it; `message` is the same
+ * sentence without its `Node '<id>' (TYPE)` opening, so the canvas can head it
+ * with the node's title instead of an id nobody recognises.
+ */
+export interface Finding {
+  code: string
+  severity: 'error' | 'warning'
+  text: string
+  message: string
+  subject: 'node' | 'edge' | 'workflow'
+  node_id: string | null
+  edge_id: string | null
+  handle: string | null
+  related_node_ids: string[]
+  related_edge_ids: string[]
+}
+
+/** One node type's sockets and what each will accept. */
+export interface ConnectionRuleType {
+  output_handles: string[]
+  tool_handles: string[]
+  accepts_tools: boolean
+  allows_inbound: boolean
+  allows_outbound: boolean
+  provides_tool: boolean
+  is_tool_group: boolean
+  is_agent: boolean
+  uses_named_routes: boolean
+  /** target type -> the handles on it this type may land on */
+  connects_to: Record<string, string[]>
+}
+
+export interface ConnectionRules {
+  tools_handle: string
+  input_handle: string
+  default_route: string
+  types: Record<string, ConnectionRuleType>
+  /** "SOURCE>TARGET@handle" -> refusal code. Absent means allowed. */
+  refusals: Record<string, string>
+  /** refusal code -> sentence, with {source} / {target} / {handle} to fill in. */
+  messages: Record<string, string>
+  refusal_codes: string[]
+  tool_consumers: string[]
+  tool_providers: string[]
+  tool_groups: string[]
 }
 
 /** One tool on an MCP server, as the server described it. */

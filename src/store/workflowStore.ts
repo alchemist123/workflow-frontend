@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import { addEdge, applyNodeChanges, applyEdgeChanges } from '@xyflow/react'
 import type { Node, Edge, Connection, NodeChange, EdgeChange } from '@xyflow/react'
-import type { Workflow, WorkflowVersion, CompileResponse, WorkflowExecution, RunMode } from '../types/workflow'
-import { workflowApi } from '../api/client'
+import type { Workflow, WorkflowVersion, CompileResponse, WorkflowExecution, RunMode, PaletteNode } from '../types/workflow'
+import { workflowApi, type ConnectionRules, type Finding } from '../api/client'
 
 interface WorkflowState {
   // Canvas state
@@ -27,6 +27,22 @@ interface WorkflowState {
   isExecuting: boolean
   isPackaging: boolean
   sidebarOpen: boolean
+
+  /** Node types and connection rules, fetched from the backend registry. */
+  palette: PaletteNode[]
+  rules: ConnectionRules | null
+
+  /** Validation results, each anchored to the node or edge it is about. */
+  findings: Finding[]
+
+  /**
+   * A request to show the "what goes here?" menu, from a `+` on a handle.
+   *
+   * Lives in the store because the node that raises it and the canvas that
+   * draws the menu are not in the same subtree — a node is rendered by
+   * ReactFlow, the menu is a sibling of it.
+   */
+  suggestFrom: { nodeId: string; handle: string; x: number; y: number } | null
   compileErrors: string[]
   packageResult: {
     package_dir: string
@@ -41,7 +57,8 @@ interface WorkflowState {
   onNodesChange: (changes: NodeChange[]) => void
   onEdgesChange: (changes: EdgeChange[]) => void
   onConnect: (connection: Connection) => void
-  addNode: (type: string, position: { x: number; y: number }) => void
+  /** Returns the new node's id, so a caller can wire it up immediately. */
+  addNode: (type: string, position: { x: number; y: number }) => string
   updateNodeConfig: (nodeId: string, config: Record<string, unknown>) => void
   updateNodeMetadata: (nodeId: string, metadata: { title?: string; description?: string }) => void
   deleteNode: (nodeId: string) => void
@@ -58,12 +75,68 @@ interface WorkflowState {
   loadNodeLogs: (workflowId: string, executionId: string) => Promise<void>
   clearNodeStatus: () => void
   setSidebarOpen: (open: boolean) => void
+  loadRules: () => Promise<void>
+  revalidate: () => void
+  askWhatGoesHere: (nodeId: string, handle: string, x: number, y: number) => void
+  clearSuggestion: () => void
   setRunMode: (mode: RunMode) => void
   clearPackageResult: () => void
   loadCanvas: (version: WorkflowVersion) => void
 }
 
+/**
+ * The canvas in the shape the compiler reads.
+ *
+ * Extracted because three callers now need it — saving, live validation, and
+ * the field-mapping picker — and they were drifting: the picker built its own
+ * copy with slightly different defaults. No `schema_version`: the backend
+ * stamps the current one, so this cannot go stale against a migration.
+ */
+export function canvasPayload(nodes: Node[], edges: Edge[]) {
+  return {
+    nodes: nodes.map((n) => ({
+      id: n.id,
+      type: n.type!,
+      version: '1',
+      position: n.position,
+      metadata: (n.data.metadata as { title: string; description: string }) || { title: '', description: '' },
+      config: (n.data.config as Record<string, unknown>) || {},
+      io: (n.data.io as object) || { input_schema: { type: 'object' }, output_schema: { type: 'object' } },
+      policies: (n.data.policies as object) || { timeout_seconds: 60, retry: { max_attempts: 1 }, on_error: 'fail' },
+    })),
+    edges: edges.map((e) => ({
+      id: e.id,
+      source: e.source,
+      source_handle: e.sourceHandle || 'output',
+      target: e.target,
+      target_handle: e.targetHandle || 'input',
+      condition: null,
+    })),
+  }
+}
+
 let nodeCounter = 0
+
+/** Pending live-validation pass, so a flurry of edits makes one request. */
+let revalidateTimer: number | null = null
+
+/**
+ * `validation_errors` holds finding objects now, but rows written before that
+ * hold plain strings. Both shapes live in the same column — the alternative
+ * was the project's first database migration for what is a display detail —
+ * so every reader goes through here.
+ */
+function asMessages(stored: unknown): string[] {
+  if (!Array.isArray(stored)) return []
+  return stored.map((item) =>
+    typeof item === 'string' ? item : String((item as { text?: string })?.text ?? ''),
+  ).filter(Boolean)
+}
+
+function asFindings(stored: unknown): Finding[] {
+  if (!Array.isArray(stored)) return []
+  return stored.filter((item) => item && typeof item === 'object') as Finding[]
+}
 
 /**
  * Paint a run onto the canvas as it happens.
@@ -211,9 +284,18 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   packageResult: null,
   sidebarOpen: false,
   compileErrors: [],
+  palette: [],
+  rules: null,
+  findings: [],
+  suggestFrom: null,
 
   onNodesChange: (changes) => {
     set((state) => ({ nodes: applyNodeChanges(changes, state.nodes) }))
+    // Position-only changes cannot alter a verdict, and dragging a node emits
+    // one per frame.
+    if (changes.some((c) => c.type !== 'position' && c.type !== 'select')) {
+      get().revalidate()
+    }
   },
 
   onEdgesChange: (changes) => {
@@ -221,6 +303,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       const edges = applyEdgeChanges(changes, state.edges)
       return { edges, nodes: syncForkBranches(state.nodes, edges) }
     })
+    get().revalidate()
   },
 
   onConnect: (connection) => {
@@ -236,6 +319,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       const edges = addEdge(edge, state.edges)
       return { edges, nodes: syncForkBranches(state.nodes, edges) }
     })
+    get().revalidate()
   },
 
   addNode: (type, position) => {
@@ -253,6 +337,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       },
     }
     set((state) => ({ nodes: [...state.nodes, newNode] }))
+    get().revalidate()
+    return newNode.id
   },
 
   updateNodeConfig: (nodeId, config) => {
@@ -261,6 +347,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         n.id === nodeId ? { ...n, data: { ...n.data, config } } : n
       ),
     }))
+    get().revalidate()
   },
 
   updateNodeMetadata: (nodeId, metadata) => {
@@ -290,6 +377,57 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   setCurrentWorkflow: (wf) => set({ currentWorkflow: wf }),
 
+  /**
+   * Fetch the node types and connection rules from the backend registry.
+   *
+   * The canvas used to work entirely from a hand-written list in
+   * `src/nodes/index.ts`, which had already drifted — the AGENT type was
+   * missing from it and rendered as "Unknown node type". The static list stays
+   * as an offline fallback; this is what makes it authoritative.
+   */
+  loadRules: async () => {
+    try {
+      const [palette, rules] = await Promise.all([
+        workflowApi.getPalette(),
+        workflowApi.getConnectionRules(),
+      ])
+      set({ palette, rules })
+    } catch {
+      // The static palette still renders; connections simply are not judged
+      // until the backend is reachable.
+    }
+  },
+
+  /**
+   * Re-check the canvas and mark whatever is wrong, without saving.
+   *
+   * Debounced because it fires on every change while someone is dragging a
+   * node around. The check itself costs about half a millisecond on the
+   * server; the debounce is about not flooding the network, and about not
+   * scolding someone mid-gesture for a workflow they are halfway through
+   * drawing.
+   */
+  revalidate: () => {
+    if (revalidateTimer !== null) window.clearTimeout(revalidateTimer)
+    revalidateTimer = window.setTimeout(async () => {
+      const { nodes, edges } = get()
+      if (nodes.length === 0) {
+        set({ findings: [] })
+        return
+      }
+      try {
+        const { findings } = await workflowApi.validate(canvasPayload(nodes, edges))
+        set({ findings })
+      } catch {
+        // A canvas the backend cannot even parse is not worth marking up.
+      }
+    }, 400)
+  },
+
+  askWhatGoesHere: (nodeId, handle, x, y) =>
+    set({ suggestFrom: { nodeId, handle, x, y } }),
+  clearSuggestion: () => set({ suggestFrom: null }),
+
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
 
   setRunMode: (mode) => set({ runMode: mode }),
@@ -300,26 +438,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
     set({ isSaving: true, compileErrors: [] })
 
-    const canvas = {
-      nodes: nodes.map((n) => ({
-        id: n.id,
-        type: n.type!,
-        version: '1',
-        position: n.position,
-        metadata: (n.data.metadata as { title: string; description: string }) || { title: '', description: '' },
-        config: (n.data.config as Record<string, unknown>) || {},
-        io: (n.data.io as object) || { input_schema: { type: 'object' }, output_schema: { type: 'object' } },
-        policies: (n.data.policies as object) || { timeout_seconds: 60, retry: { max_attempts: 1 }, on_error: 'fail' },
-      })),
-      edges: edges.map((e) => ({
-        id: e.id,
-        source: e.source,
-        source_handle: e.sourceHandle || 'output',
-        target: e.target,
-        target_handle: e.targetHandle || 'input',
-        condition: null,
-      })),
-    }
+    const canvas = canvasPayload(nodes, edges)
 
     try {
       const result = await workflowApi.saveCanvas(currentWorkflow.id, canvas as never)
@@ -465,7 +584,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       ? {
           version_id: version.id,
           is_valid: true,
-          errors: (version.validation_errors as string[]) || [],
+          errors: asMessages(version.validation_errors),
           warnings: [],
           ir: version.ir_json || null,
         }
@@ -476,8 +595,11 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       edges: rfEdges,
       currentVersion: version,
       lastCompile: restoredCompile,
-      compileErrors: version.is_valid ? [] : ((version.validation_errors as string[]) || []),
+      compileErrors: version.is_valid ? [] : asMessages(version.validation_errors),
       compileWarnings: [],
+      // Marks come back with the canvas, so a reopened workflow shows what is
+      // wrong without waiting for the first edit to trigger a re-check.
+      findings: version.is_valid ? [] : asFindings(version.validation_errors),
     })
   },
 }))
